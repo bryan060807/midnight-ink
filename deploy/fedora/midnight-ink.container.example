@@ -1,0 +1,22 @@
+# Copy to ~/.config/containers/systemd/midnight-ink.container after review.
+# Rootless Podman Quadlet service; port only exposed to Fedora localhost.
+[Unit]
+Description=Midnight Ink self-hosted application
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=localhost/midnight-ink:stable
+ContainerName=midnight-ink
+EnvironmentFile=/home/aibry/.config/midnight-ink/runtime.env
+Volume=/home/aibry/.local/share/midnight-ink:/app/.data:Z
+PublishPort=127.0.0.1:3031:3031
+NoNewPrivileges=true
+
+[Service]
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target
