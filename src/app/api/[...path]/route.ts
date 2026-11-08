@@ -7,6 +7,7 @@ import { readPhoto, removePhotos, savePhoto, validateImage } from '../../../lib/
 import { parseDesign } from '../../../lib/design';
 import { worksheetSvg } from '../../../lib/worksheets';
 import { exercises } from '../../../lib/curriculum';
+import { getAuthConfig } from '../../../lib/auth-config';
 
 export const runtime='nodejs';
 export const dynamic='force-dynamic';
@@ -49,9 +50,10 @@ async function handle(request:Request,context:{params:Promise<{path:string[]}>})
     const {path:segments}=await context.params;
     const [resource,id,action]=segments;
     if(resource==='health'&&request.method==='GET') {
-      if(process.env.NODE_ENV==='production')return json({status:'blocked',database:'not checked',authentication:'not configured; local demo disabled in production'},503);
+      const config=getAuthConfig();
+      if(!config && (process.env.NODE_ENV==='production' || process.env.LOCAL_DEMO_ENABLED==='false'))return json({status:'blocked',database:'not checked',authentication:'not configured; production demo fallback is disabled'},503);
       const coachProvider=process.env.ROOK_PROVIDER==='openai'&&process.env.OPENAI_API_KEY?'openai':'offline';
-      const db=getDatabase();db.prepare('SELECT 1').get();return json({status:'ok',database:'sqlite',mode:'local-demo',coachProvider,ai:coachProvider==='openai'?'optional provider configured':'offline'});
+      const db=getDatabase();db.prepare('SELECT 1').get();return json({status:'ok',database:'sqlite',mode:config?'oidc':'local-demo',authentication:config?'configured; real-provider acceptance is separate':'local demo',coachProvider,ai:coachProvider==='openai'?'optional provider configured':'offline'});
     }
     const profileId=requireWorkspace(request);
     const db=getDatabase();
@@ -92,7 +94,7 @@ async function handle(request:Request,context:{params:Promise<{path:string[]}>})
       }
     }
     const tableMap:Record<string,'Equipment'|'PracticeSession'|'DesignProject'|'Goal'|undefined>={equipment:'Equipment',sessions:'PracticeSession',designs:'DesignProject',goals:'Goal'};
-    const table=tableMap[resource];
+    const table=Object.hasOwn(tableMap,resource)?tableMap[resource]:undefined;
     if(table){
       if(request.method==='POST'&&!id)return json(createRecord(table,profileId,table==='DesignProject'?await designBody(request):await body(request)),201);
       if(request.method==='PATCH'&&id)return json(updateRecord(table,profileId,id,table==='DesignProject'?await designBody(request):await body(request)));

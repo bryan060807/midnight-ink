@@ -3,10 +3,11 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { modules, lessons, exercises, techniqueCards } from './curriculum';
-import { ApiError } from './auth';
+import { ApiError } from './errors';
 import { equipmentSchema, sessionSchema, designSchema, goalSchema } from './schemas';
 
 type Row = Record<string, unknown>;
+export interface PracticePhotoSummary { id:string;sessionId:string;mimeType:string;width:number;height:number;size:number;createdAt:string;url:string }
 type ContentTable = 'Equipment'|'PracticeSession'|'DesignProject'|'Goal';
 const tables:ContentTable[] = ['Equipment','PracticeSession','DesignProject','Goal'];
 let singleton:DatabaseSync|undefined;
@@ -38,6 +39,11 @@ export function initializeDatabase(filename = process.env.DATABASE_PATH || path.
 export function getDatabase():DatabaseSync {
   singleton ??= initializeDatabase();
   return singleton;
+}
+
+export function closeDatabase() {
+  singleton?.close();
+  singleton = undefined;
 }
 
 export function seedDatabase(db:DatabaseSync) {
@@ -153,16 +159,16 @@ export function saveCoaching(profileId:string,input:{question:string,response:un
   return {id,...input,createdAt:stamp};
 }
 
-export function getWorkspace(profileId='local-demo',db=getDatabase()) {
+export function getWorkspace(profileId:string,db=getDatabase()) {
   const profile=db.prepare('SELECT * FROM Profile WHERE id=?').get(profileId);
   if (!profile) throw new ApiError(404,'Workspace not found.');
   const contentRows=(table:string)=>db.prepare(`SELECT * FROM ${table} WHERE profileId=? ORDER BY createdAt DESC`).all(profileId).map(r=>decode(r as Row));
-  const photos=db.prepare('SELECT id,sessionId,mimeType,width,height,size,createdAt FROM PracticePhoto WHERE profileId=? ORDER BY createdAt DESC').all(profileId).map(r=>({...r,url:`/api/photos/${r.id}`}));
+  const photos=db.prepare('SELECT p.id,p.sessionId,p.mimeType,p.width,p.height,p.size,p.createdAt FROM PracticePhoto p JOIN PracticeSession s ON s.id=p.sessionId AND s.profileId=p.profileId WHERE p.profileId=? ORDER BY p.createdAt DESC').all(profileId).map(r=>({...r,url:`/api/photos/${r.id}`} as unknown as PracticePhotoSummary));
   return {
     profile,settings:db.prepare('SELECT coachName,goalMinutes FROM UserSettings WHERE profileId=?').get(profileId),
     equipment:contentRows('Equipment'),lessonProgress:db.prepare('SELECT id,lessonId,completedAt FROM LessonProgress WHERE profileId=?').all(profileId),
     sessions:contentRows('PracticeSession'),photos,
-    assessments:db.prepare('SELECT id,sessionId,content,updatedAt FROM SkillAssessment WHERE profileId=?').all(profileId).map(r=>decode(r as Row)),
+    assessments:db.prepare('SELECT a.id,a.sessionId,a.content,a.updatedAt FROM SkillAssessment a JOIN PracticeSession s ON s.id=a.sessionId AND s.profileId=a.profileId WHERE a.profileId=?').all(profileId).map(r=>decode(r as Row)),
     designs:contentRows('DesignProject'),goals:contentRows('Goal'),coaching:contentRows('CoachingSession'),
   };
 }

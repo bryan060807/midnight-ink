@@ -18,6 +18,7 @@ async function call(method:keyof typeof handlers,resource:string,input?:unknown,
 }
 
 beforeAll(()=>{
+  for (const name of ['AIBRY_ID_ISSUER','AIBRY_ID_CLIENT_ID','APP_ORIGIN','SESSION_SECRET']) vi.stubEnv(name,'');
   directory=mkdtempSync(path.join(tmpdir(),'midnight-api-test-'));
   vi.stubEnv('MIDNIGHT_INK_DATA_DIR',directory);
   vi.stubEnv('DATABASE_PATH',path.join(directory,'test.sqlite'));

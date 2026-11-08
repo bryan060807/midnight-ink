@@ -18,6 +18,7 @@ const owner = 'local-demo';
 const assessment = { consistency: 2, smoothness: 3, coverage: 3, edgeControl: 2, surfaceDamage: 1, goals: 'Keep starts inside the target marks.' };
 
 beforeEach(() => {
+  for (const name of ['AIBRY_ID_ISSUER','AIBRY_ID_CLIENT_ID','APP_ORIGIN','SESSION_SECRET']) vi.stubEnv(name,'');
   directory = mkdtempSync(path.join(tmpdir(), 'midnight-ink-test-'));
   filename = path.join(directory, 'test.sqlite');
   db = initializeDatabase(filename);
@@ -32,7 +33,7 @@ afterEach(() => {
 describe('migrations and repeatable seed data', () => {
   it('creates the full schema, enables foreign keys and records applied migrations once', () => {
     applyMigrations(db);
-    expect(db.prepare('SELECT version FROM SchemaMigration').all()).toHaveLength(1);
+    expect(db.prepare('SELECT version FROM SchemaMigration ORDER BY version').all().map(row => row.version)).toEqual([1,2]);
     expect(db.prepare('PRAGMA foreign_keys').get()?.foreign_keys).toBe(1);
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name);
     for (const name of ['Profile', 'Equipment', 'Cartridge', 'Ink', 'LearningModule', 'Lesson', 'Exercise', 'LessonProgress', 'PracticeSession', 'PracticePhoto', 'SkillAssessment', 'DesignProject', 'TechniqueCard', 'ReferenceResource', 'CoachingSession', 'UserSettings']) expect(tables).toContain(name);

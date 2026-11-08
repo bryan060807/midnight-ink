@@ -74,14 +74,20 @@ npm run build
 npm run test:e2e
 ```
 
-Browser tests run their own development server on port **3100** with `.data/e2e` storage. They never reuse the ordinary development server. If Chromium is not installed, run `npx playwright install chromium` first; Linux may also need `npx playwright install --with-deps chromium`. The config uses `/usr/bin/chromium` when present, otherwise Playwright's bundled browser. `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` can select an existing compatible browser.
+`npm run test:e2e` runs the original studio suite and the authentication suite sequentially, avoiding Next.js development-server lock conflicts. The studio suite uses port **3100** with `.data/e2e`; the auth suite uses app port **3101**, an isolated generated-key mock issuer on **3211**, and a per-run `.data/auth-e2e-*` directory. They never reuse the ordinary development server. Stop any other `next dev` process for this checkout before running browser tests. If Chromium is not installed, run `npx playwright install chromium` first; Linux may also need `npx playwright install --with-deps chromium`. The config uses `/usr/bin/chromium` when present, otherwise Playwright's bundled browser. `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` can select an existing compatible browser.
 
 `GET /api/health` checks local database availability and reports the current workspace/provider mode. Build and test outcomes from this implementation are recorded in [TESTING.md](docs/TESTING.md); CI runs validation without a provider key.
 
 Browser captures: [desktop dashboard](docs/screenshots/dashboard-desktop.png) · [mobile dashboard](docs/screenshots/dashboard-mobile.png).
 
-## Hosting status
+## AIBRY ID and hosting status
 
-This build does not deploy anything. Production mode intentionally fails closed because verified authentication is not implemented; `npm start` after a production build does not enable a public demo. AIBRY ID is a future integration boundary, not a configured account system. No Midnight Palette runtime, AIBRY service, Cloudflare setting, existing database, or OAuth registration is changed.
+The application includes OIDC Authorization Code + PKCE login, persistent revocable server-side sessions, per-subject private workspaces, logout, and a separately authorized one-time demo-data claim. Keep the optional auth block in `.env.example` commented for ordinary local demo use. To test authenticated-only access, supply the complete server-side auth configuration and set `LOCAL_DEMO_ENABLED=false`.
+
+For a real installation, the operator must register the proposed public client `midnight-ink-public-web`, approve the exact `{APP_ORIGIN}/auth/aibry-id/callback`, provide a stable random `SESSION_SECRET`, and validate the canonical `https://id.aibrylabs.com` discovery/registration. The proposed future hostname `https://midnight-ink.aibrylabs.com` is not assumed to exist. No client secret is used. See [integration](docs/AIBRY-ID-INTEGRATION.md), [real acceptance](docs/AIBRY-ID-ACCEPTANCE.md), and [demo data migration](docs/DEMO-DATA-MIGRATION.md).
+
+Production always disables local-demo fallback. Missing critical auth configuration fails closed; configured protected requests require a verified application session. A successful production build is not a completed real-provider login. Live discovery was blocked by this cloud workspace's proxy, and no actual client registration or interactive real AIBRY ID login was performed.
+
+This change deploys nothing. No Midnight Palette runtime, AIBRY provider service/database, Cloudflare setting, Fedora/Windows service, or OAuth registration was changed.
 
 See [architecture](docs/ARCHITECTURE.md), [curriculum](docs/CURRICULUM.md), [safety and privacy](docs/SAFETY.md), [deployment blockers](docs/DEPLOYMENT.md), and [roadmap](docs/ROADMAP.md).

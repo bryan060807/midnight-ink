@@ -24,11 +24,17 @@ The repository API separates persistence from the interface. A PostgreSQL/object
 
 ## Access and request handling
 
-`requireWorkspace` is the identity boundary. It supplies one fixed local-development profile, rejects remote hosts and cross-origin/cross-site writes, honors an explicitly disabled demo flag, and always rejects production access. Client input never chooses the active owner. All repository reads and writes scope owned records by `profileId`; exercise/equipment relationships are checked on session writes.
+`src/lib/auth-config.ts` validates the canonical application origin/issuer and secret configuration, derives the exact callback, and implements trusted-host, same-origin, cookie, token-digest, and safe-return-path rules. `src/lib/oidc.ts` discovers the provider, binds one-use state/nonce/PKCE to the browser, validates JWTs with a maintained signature library, and establishes/revokes application sessions. `src/lib/auth-store.ts` owns persistent identity, transaction, and session records. `requireWorkspace` resolves the active owner server-side before any protected operation.
 
-The catch-all API handles workspace data, CRUD, lesson completion, uploads, export/deletion, and health. Responses avoid caching private data. Upload bytes and JSON are bounded, malformed requests receive actionable validation errors, and raw user text, images, tokens, and provider response bodies are not logged.
+Migration `002_auth.sql` adds immutable `(issuer,subject)` mapping to profiles, opaque-session digests with revocation/expiry, browser-bound login transactions, and a unique demo-import receipt. Mutable email/display name never join accounts. New identities receive their own profile/settings and no automatic demo inventory. Existing demo records remain intact. See [demo migration](DEMO-DATA-MIGRATION.md) for the separate explicit one-time claim.
 
-Authentication is deliberately not simulated. Future AIBRY ID work belongs at this boundary: verified issuer/audience/signature/session acceptance tests, then a server-owned profile mapping. Production readiness requires testing every owned resource with multiple real identities.
+Protected requests require an unexpired database-backed session, except for explicitly enabled loopback-only development demo access. Production has no anonymous/demo fallback, and malformed or expired authenticated cookies do not silently reveal a demo workspace. The login/configuration screen and authentication entry/callback routes are public; personal data is not. The UI validates session status before requesting workspace data and clears expired account state.
+
+Every record operation scopes owned data by the resolved `profileId`; client JSON, query parameters, and identity-like headers cannot select another owner. Child resources such as photos additionally verify their owning practice session. Authenticated mutations enforce the exact configured browser Origin and reject cross-site requests. The canonical `APP_ORIGIN` is authoritative; forwarded host/protocol/identity headers are not trusted. A reverse proxy must overwrite upstream Host with that exact approved authority and prevent direct public upstream access.
+
+The API handles workspace CRUD, lesson completion, uploads, export/deletion, and health. Responses avoid caching private data. Upload bytes and JSON are bounded, malformed requests receive actionable validation errors, and raw user text, images, tokens, and provider response bodies are not logged. Login transactions and sessions have explicit lifetimes and cleanup; logout revokes the database session and clears its HttpOnly cookie. No provider bearer token is exposed to JavaScript or retained as a reusable application credential.
+
+Read [AIBRY-ID-INTEGRATION.md](AIBRY-ID-INTEGRATION.md) for the exact supported protocol/configuration and [AIBRY-ID-ACCEPTANCE.md](AIBRY-ID-ACCEPTANCE.md) for operator registration/live-login gates. Source inspection or local mock acceptance does not establish a working real registration or production deployment.
 
 ## Creative tools and coaching
 
@@ -43,3 +49,9 @@ The source at `bryan060807/midnight-palette` was inspected read-only at main com
 Reviewed files were `docs/DIBBY.md`, `server/dibby.mjs`, `server/dibby-mcp.mjs`, `server/provider.mjs`, and `public/dibby.js`. These relevant files had no differences between the inspected refs. Observed patterns included deterministic compatible-card retrieval, explicit curated fallback, bounded structured provider output with candidate-ID validation, idempotent SQLite seeding, safe text rendering, and an explicit loopback developer boundary. The read-only MCP interface was studied as an architectural reference; Midnight Ink does not expose an MCP server.
 
 Those source observations informed the independent implementation. They do not establish current deployment state, live identity readiness, or external-resource review. No reference application files, credentials, production data, or services were changed or copied into Midnight Ink.
+
+## AIBRY ID reference inspection
+
+The maintained AIBRY ID implementation was inspected read-only at `b5e4fd8229d0bf8992d537b4333d407ecdfd3527`. `apps/server/src/oidc/provider.ts`, `signing-keys.ts`, `client-validation.ts`, the OIDC repository, configuration, and admin routes establish a source contract for public code-only clients, required PKCE, RS256 signing, and exact callback validation. Its general client-create API currently allows private loopback callbacks, with special HTTPS seed/validator paths for existing named applications. No Midnight Ink registration was observed. The separate provider change plan is documentation only; no provider source/database/runtime was modified.
+
+A request for live discovery at the canonical issuer was blocked by this cloud environment's outbound proxy with CONNECT HTTP 403. Runtime metadata and real client availability are unverified; the application discovers and validates metadata when used in an authorized network environment.

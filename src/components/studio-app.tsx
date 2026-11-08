@@ -1,5 +1,11 @@
 "use client";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 import Link from "next/link";
 import {
   ArrowDownToLine,
@@ -17,6 +23,9 @@ import {
   House,
   Layers3,
   Library,
+  LogOut,
+  LockKeyhole,
+  UserRound,
   Menu,
   MessageSquare,
   Palette,
@@ -35,6 +44,27 @@ import { modules, lessons, exercises, techniqueCards } from "@/lib/curriculum";
 import DesignStudio from "./design-studio";
 import PracticeStudio from "./practice-studio";
 import EquipmentManager from "./equipment-manager";
+
+type AuthSession = {
+  authenticated: boolean;
+  mode: "demo" | "authenticated" | "anonymous";
+  profile: { id: string; name: string } | null;
+  identity: {
+    issuer: string;
+    subject: string;
+    email?: string | null;
+    name?: string | null;
+  } | null;
+  expiresAt: number | null;
+  loginAvailable: boolean;
+  configurationValid: boolean;
+  demoImportAvailable?: boolean;
+};
+
+function loginDestination(reason = "expired") {
+  const returnTo = `${window.location.pathname}${window.location.search}`;
+  return `/login?error=${encodeURIComponent(reason)}&returnTo=${encodeURIComponent(returnTo)}`;
+}
 
 type Workspace = {
   profile: { id: string; name: string; level: string; path: string };
@@ -104,7 +134,7 @@ const pageInfo: Record<string, [string, string]> = {
   ],
   settings: [
     "Make this space yours.",
-    "Your local workspace, learning preferences, and personal data.",
+    "Your workspace, learning preferences, and personal data.",
   ],
 };
 async function mutate(url: string, body: unknown, method = "POST") {
@@ -114,6 +144,10 @@ async function mutate(url: string, body: unknown, method = "POST") {
     body: JSON.stringify(body),
   });
   const result = await response.json();
+  if (response.status === 401) {
+    window.dispatchEvent(new Event("midnight-session-expired"));
+    throw new Error("Your session has ended. Sign in again to continue.");
+  }
   if (!response.ok)
     throw new Error(result.error || "The change could not be saved.");
   return result;
@@ -188,235 +222,437 @@ function Stats({ data }: { data: Workspace }) {
 }
 export default function StudioApp({ section }: { section: string }) {
   const [data, setData] = useState<Workspace | null>(null);
+  const [session, setSession] = useState<AuthSession | null>(null);
   const [error, setError] = useState("");
   const [more, setMore] = useState(false);
-  const refresh = useCallback(async () => {
-    const response = await fetch("/api/workspace", { cache: "no-store" });
-    const json = await response.json();
-    if (!response.ok)
-      throw new Error(json.error || "The workspace could not be opened.");
-    setData(json);
-    setError("");
+  const [accessPending, setAccessPending] = useState(true);
+  const refreshVersion = useRef(0);
+  const currentOwner = useRef<string | null>(null);
+  const endSession = useCallback(() => {
+    refreshVersion.current += 1;
+    currentOwner.current = null;
+    setData(null);
+    setSession(null);
+    window.location.replace(loginDestination());
   }, []);
+  const refresh = useCallback(async () => {
+    const version = ++refreshVersion.current;
+    try {
+      const sessionResponse = await fetch("/api/auth/session", {
+        cache: "no-store",
+      });
+      const auth = (await sessionResponse.json()) as AuthSession & {
+        error?: string;
+      };
+      if (version !== refreshVersion.current) return;
+      if (!sessionResponse.ok) {
+        setData(null);
+        setSession(null);
+        throw new Error(
+          auth.error ||
+            "The sign-in service is not configured. Open the sign-in page for details.",
+        );
+      }
+      if (
+        auth.mode === "anonymous" ||
+        (!auth.authenticated && auth.mode !== "demo")
+      ) {
+        endSession();
+        return;
+      }
+      if (currentOwner.current !== auth.profile?.id) {
+        setData(null);
+        currentOwner.current = auth.profile?.id || null;
+      }
+      setSession(auth);
+      const response = await fetch("/api/workspace", { cache: "no-store" });
+      const json = await response.json();
+      if (version !== refreshVersion.current) return;
+      if (response.status === 401) {
+        endSession();
+        return;
+      }
+      if (!response.ok) {
+        setData(null);
+        throw new Error(
+          response.status === 403
+            ? "Access to this workspace was denied. Sign in with the correct account or contact the operator."
+            : json.error || "The workspace could not be opened.",
+        );
+      }
+      if (auth.profile && json.profile?.id !== auth.profile.id) {
+        setData(null);
+        throw new Error(
+          "The workspace identity could not be confirmed. Sign in again.",
+        );
+      }
+      setData(json);
+      setError("");
+      setAccessPending(document.visibilityState === "hidden");
+    } catch (failure) {
+      if (version !== refreshVersion.current) return;
+      setData(null);
+      setAccessPending(false);
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "The workspace could not be opened. Try again.",
+      );
+      throw failure;
+    }
+  }, [endSession]);
   useEffect(() => {
     refresh().catch((e) => setError(e.message));
-  }, [refresh]);
+    const validate = () => {
+      if (document.visibilityState === "visible") {
+        setAccessPending(true);
+        refresh().catch((e) => {
+          setData(null);
+          setError(e.message);
+        });
+      }
+    };
+    const visibilityChanged = () => {
+      if (document.visibilityState === "hidden") {
+        refreshVersion.current += 1;
+        // Keep unsaved child drafts mounted, but make every private view
+        // invisible and inert until the returning tab validates the same owner.
+        setAccessPending(true);
+      } else validate();
+    };
+    const expired = () => endSession();
+    const interval = window.setInterval(validate, 60_000);
+    window.addEventListener("focus", validate);
+    document.addEventListener("visibilitychange", visibilityChanged);
+    window.addEventListener("midnight-session-expired", expired);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", validate);
+      document.removeEventListener("visibilitychange", visibilityChanged);
+      window.removeEventListener("midnight-session-expired", expired);
+    };
+  }, [refresh, endSession]);
+  useEffect(() => {
+    if (session?.mode !== "authenticated" || !session.expiresAt) return;
+    const remaining = session.expiresAt - Date.now();
+    if (remaining <= 0) {
+      endSession();
+      return;
+    }
+    const timer = window.setTimeout(
+      endSession,
+      Math.min(remaining, 2_147_483_647),
+    );
+    return () => window.clearTimeout(timer);
+  }, [session, endSession]);
+  if (!session)
+    return (
+      <main className="initial-loading auth-validation" aria-live="polite">
+        <div className="brand-glyph">✦</div>
+        <h1>
+          {error
+            ? "Your workspace is protected."
+            : "Checking your workspace access…"}
+        </h1>
+        <p className="muted">
+          {error || "Your private records will open after session validation."}
+        </p>
+        {error && (
+          <Link className="btn btn-primary" href="/login">
+            Open sign-in <ArrowRight size={15} />
+          </Link>
+        )}
+      </main>
+    );
   const current = navigation.find((n) => n.id === section)!;
   const title = pageInfo[section];
   return (
-    <div className="shell">
-      <a className="skip-link" href="#main-content">
-        Skip to content
-      </a>
-      <aside className="sidebar">
-        <Link href="/" className="brand" aria-label="Midnight Ink home">
-          <span className="brand-glyph">✦</span>
-          <div className="brand-name">
-            MIDNIGHT INK<span>AN AIBRY LABS STUDIO</span>
-          </div>
-        </Link>
-        <div className="nav-caption">THE STUDIO</div>
-        <nav className="nav" aria-label="Main navigation">
-          {navigation.map((n) => (
-            <Link
-              key={n.id}
-              href={n.href}
-              className={section === n.id ? "active" : ""}
-              aria-current={section === n.id ? "page" : undefined}
-            >
-              <n.icon size={17} strokeWidth={1.6} />
-              {n.label}
-              {section === n.id && <span className="nav-dot" />}
-            </Link>
-          ))}
-        </nav>
-        <div className="sidebar-bottom">
-          <div className="workspace-badge">
-            <strong>{data?.profile.name || "Your local workspace"}</strong>
-            <span className="muted">
-              <span className="status-dot" />
-              Private development workspace
-            </span>
-          </div>
-          <div className="sidebar-foot">
-            <div className="row">
-              <ShieldCheck size={13} />
-              Made for mindful practice.
+    <>
+      <div
+        className="shell"
+        style={{ visibility: accessPending ? "hidden" : undefined }}
+        inert={accessPending || undefined}
+        aria-hidden={accessPending || undefined}
+      >
+        <a className="skip-link" href="#main-content">
+          Skip to content
+        </a>
+        <aside className="sidebar">
+          <Link href="/" className="brand" aria-label="Midnight Ink home">
+            <span className="brand-glyph">✦</span>
+            <div className="brand-name">
+              MIDNIGHT INK<span>AN AIBRY LABS STUDIO</span>
             </div>
-            <p style={{ margin: "8px 0 0" }}>
-              Learn the craft. Earn the confidence.
-            </p>
-          </div>
-        </div>
-      </aside>
-      <div className="app-main">
-        <header className="topbar">
-          <div className="breadcrumb">
-            Your workspace <ChevronRight size={12} />
-            <strong>{current.label}</strong>
-          </div>
-          <Link href="/" className="mobile-brand">
-            <span className="brand-glyph">✦</span>MIDNIGHT INK
           </Link>
-          <div className="topbar-right">
-            <span className="local-badge">
-              <span
-                style={{
-                  width: 5,
-                  height: 5,
-                  background: "#9aad87",
-                  borderRadius: "50%",
-                }}
-              />{" "}
-              LOCAL DEMO
-            </span>
-            <Link
-              href="/settings"
-              className="avatar"
-              aria-label="Workspace settings"
-            >
-              {(data?.profile.name || "MI").slice(0, 2).toUpperCase()}
-            </Link>
-          </div>
-        </header>
-        <main id="main-content" className="content">
-          <div className="page-heading between">
-            <div>
-              <div className="eyebrow">
-                {section === "dashboard"
-                  ? "WELCOME TO MIDNIGHT INK"
-                  : current.label.toUpperCase()}
-              </div>
-              <h1>{title[0]}</h1>
-              <p>{title[1]}</p>
-            </div>
-            <span className="date">
-              <Circle size={6} fill="currentColor" />
-              LEARN · PRACTICE · CREATE
-            </span>
-          </div>
-          {error ? (
-            <div className="panel">
-              <div className="error" role="alert">
-                {error}
-              </div>
-              <p className="muted" style={{ marginTop: 17 }}>
-                The demo workspace runs locally during development. Production
-                stays closed until authentication is implemented.
-              </p>
-              <button
-                className="btn"
-                onClick={() => refresh().catch((e) => setError(e.message))}
-              >
-                Retry workspace
-              </button>
-            </div>
-          ) : !data ? (
-            <div aria-live="polite" className="stack">
-              <p className="muted">Opening your local workspace…</p>
-              <div className="skeleton loading-shimmer" />
-              <div className="grid-2">
-                <div className="skeleton loading-shimmer" />
-                <div className="skeleton loading-shimmer" />
-              </div>
-            </div>
-          ) : (
-            <>
-              {section === "dashboard" && (
-                <Dashboard data={data} refresh={refresh} />
-              )}
-              {section === "learn" && <Learn data={data} refresh={refresh} />}
-              {section === "practice" && (
-                <PracticeStudio workspace={data} onRefresh={refresh} />
-              )}
-              {section === "equipment" && (
-                <EquipmentManager workspace={data} onRefresh={refresh} />
-              )}
-              {section === "design" && (
-                <DesignStudio designs={data.designs} onRefresh={refresh} />
-              )}
-              {section === "coach" && <Coach data={data} refresh={refresh} />}
-              {section === "progress" && (
-                <Progress data={data} refresh={refresh} />
-              )}
-              {section === "library" && <ReferenceLibrary />}
-              {section === "settings" && (
-                <WorkspaceSettings data={data} refresh={refresh} />
-              )}
-            </>
-          )}
-          <footer className="footer">
-            <span>✦ MIDNIGHT INK · AIBRY LABS</span>
-            <span>A steady hand begins with a curious mind.</span>
-            <Link href="/learn">Education, never certification.</Link>
-          </footer>
-        </main>
-      </div>
-      <nav className="mobile-bar" aria-label="Mobile navigation">
-        {[
-          { id: "dashboard", label: "Home", href: "/", icon: House },
-          { id: "learn", label: "Learn", href: "/learn", icon: BookOpen },
-          {
-            id: "practice",
-            label: "Practice",
-            href: "/practice",
-            icon: PenLine,
-          },
-          { id: "design", label: "Create", href: "/design", icon: Palette },
-        ].map((n) => (
-          <Link
-            key={n.id}
-            href={n.href}
-            onClick={() => setMore(false)}
-            className={section === n.id ? "active" : ""}
-            aria-current={section === n.id ? "page" : undefined}
-          >
-            <n.icon size={20} strokeWidth={1.6} />
-            {n.label}
-          </Link>
-        ))}
-        <button
-          className={more ? "active" : ""}
-          aria-expanded={more}
-          aria-controls="more-navigation"
-          onClick={() => setMore(!more)}
-        >
-          {more ? <X size={20} /> : <Menu size={20} />}More
-        </button>
-      </nav>
-      {more && (
-        <nav
-          id="more-navigation"
-          className="mobile-more"
-          aria-label="More navigation"
-        >
-          {navigation
-            .filter(
-              (n) =>
-                !["dashboard", "learn", "practice", "design"].includes(n.id),
-            )
-            .map((n) => (
+          <div className="nav-caption">THE STUDIO</div>
+          <nav className="nav" aria-label="Main navigation">
+            {navigation.map((n) => (
               <Link
                 key={n.id}
                 href={n.href}
-                className={n.id === section ? "active" : ""}
-                onClick={() => setMore(false)}
+                className={section === n.id ? "active" : ""}
+                aria-current={section === n.id ? "page" : undefined}
               >
-                <n.icon size={18} />
+                <n.icon size={17} strokeWidth={1.6} />
                 {n.label}
+                {section === n.id && <span className="nav-dot" />}
               </Link>
             ))}
+          </nav>
+          <div className="sidebar-bottom">
+            <div className="workspace-badge">
+              <strong>
+                {data?.profile.name ||
+                  session.profile?.name ||
+                  "Your workspace"}
+              </strong>
+              <span className="muted">
+                <span className="status-dot" />
+                {session.mode === "authenticated"
+                  ? "Private AIBRY ID workspace"
+                  : "Private development workspace"}
+              </span>
+            </div>
+            <div className="sidebar-foot">
+              <div className="row">
+                <ShieldCheck size={13} />
+                Made for mindful practice.
+              </div>
+              <p style={{ margin: "8px 0 0" }}>
+                Learn the craft. Earn the confidence.
+              </p>
+            </div>
+          </div>
+        </aside>
+        <div className="app-main">
+          <header className="topbar">
+            <div className="breadcrumb">
+              Your workspace <ChevronRight size={12} />
+              <strong>{current.label}</strong>
+            </div>
+            <Link href="/" className="mobile-brand">
+              <span className="brand-glyph">✦</span>MIDNIGHT INK
+            </Link>
+            <div className="topbar-right">
+              <span className="local-badge">
+                <span
+                  style={{
+                    width: 5,
+                    height: 5,
+                    background: "#9aad87",
+                    borderRadius: "50%",
+                  }}
+                />{" "}
+                {session.mode === "authenticated" ? "AIBRY ID" : "LOCAL DEMO"}
+              </span>
+              <details className="auth-account-menu">
+                <summary
+                  className="avatar"
+                  aria-label="Account menu"
+                  title="Account menu"
+                >
+                  {(data?.profile.name || session.profile?.name || "MI")
+                    .slice(0, 2)
+                    .toUpperCase()}
+                </summary>
+                <div className="auth-account-popover">
+                  <strong>
+                    {data?.profile.name ||
+                      session.profile?.name ||
+                      "Your workspace"}
+                  </strong>
+                  <small className="muted">
+                    {session.mode === "authenticated"
+                      ? "Connected through AIBRY ID"
+                      : "Local demo identity"}
+                  </small>
+                  <Link href="/settings">
+                    <UserRound size={15} />
+                    Account & settings
+                  </Link>
+                  {session.mode === "authenticated" ? (
+                    <form
+                      method="post"
+                      action="/auth/logout"
+                      onSubmit={() => setData(null)}
+                    >
+                      <button type="submit">
+                        <LogOut size={15} />
+                        Sign out
+                      </button>
+                    </form>
+                  ) : (
+                    session.loginAvailable && (
+                      // eslint-disable-next-line @next/next/no-html-link-for-pages -- OAuth starts with a full document navigation and must not be prefetched.
+                      <a href="/auth/aibry-id/login?returnTo=%2F">
+                        <LockKeyhole size={15} />
+                        Sign in with AIBRY ID
+                      </a>
+                    )
+                  )}
+                </div>
+              </details>
+            </div>
+          </header>
+          <main
+            id="main-content"
+            className="content"
+            key={session.profile?.id || session.mode}
+          >
+            <div className="page-heading between">
+              <div>
+                <div className="eyebrow">
+                  {section === "dashboard"
+                    ? "WELCOME TO MIDNIGHT INK"
+                    : current.label.toUpperCase()}
+                </div>
+                <h1>{title[0]}</h1>
+                <p>{title[1]}</p>
+              </div>
+              <span className="date">
+                <Circle size={6} fill="currentColor" />
+                LEARN · PRACTICE · CREATE
+              </span>
+            </div>
+            {error ? (
+              <div className="panel">
+                <div className="error" role="alert">
+                  {error}
+                </div>
+                <p className="muted" style={{ marginTop: 17 }}>
+                  Your records remain private. Retry the request, or return to
+                  sign-in if your access has changed.
+                </p>
+                <button
+                  className="btn"
+                  onClick={() => refresh().catch((e) => setError(e.message))}
+                >
+                  Retry workspace
+                </button>
+              </div>
+            ) : !data ? (
+              <div aria-live="polite" className="stack">
+                <p className="muted">Opening your private workspace…</p>
+                <div className="skeleton loading-shimmer" />
+                <div className="grid-2">
+                  <div className="skeleton loading-shimmer" />
+                  <div className="skeleton loading-shimmer" />
+                </div>
+              </div>
+            ) : (
+              <>
+                {section === "dashboard" && (
+                  <Dashboard
+                    data={data}
+                    refresh={refresh}
+                    demo={session.mode === "demo"}
+                  />
+                )}
+                {section === "learn" && <Learn data={data} refresh={refresh} />}
+                {section === "practice" && (
+                  <PracticeStudio workspace={data} onRefresh={refresh} />
+                )}
+                {section === "equipment" && (
+                  <EquipmentManager workspace={data} onRefresh={refresh} />
+                )}
+                {section === "design" && (
+                  <DesignStudio designs={data.designs} onRefresh={refresh} />
+                )}
+                {section === "coach" && <Coach data={data} refresh={refresh} />}
+                {section === "progress" && (
+                  <Progress data={data} refresh={refresh} />
+                )}
+                {section === "library" && <ReferenceLibrary />}
+                {section === "settings" && (
+                  <WorkspaceSettings
+                    data={data}
+                    refresh={refresh}
+                    session={session}
+                  />
+                )}
+              </>
+            )}
+            <footer className="footer">
+              <span>✦ MIDNIGHT INK · AIBRY LABS</span>
+              <span>A steady hand begins with a curious mind.</span>
+              <Link href="/learn">Education, never certification.</Link>
+            </footer>
+          </main>
+        </div>
+        <nav className="mobile-bar" aria-label="Mobile navigation">
+          {[
+            { id: "dashboard", label: "Home", href: "/", icon: House },
+            { id: "learn", label: "Learn", href: "/learn", icon: BookOpen },
+            {
+              id: "practice",
+              label: "Practice",
+              href: "/practice",
+              icon: PenLine,
+            },
+            { id: "design", label: "Create", href: "/design", icon: Palette },
+          ].map((n) => (
+            <Link
+              key={n.id}
+              href={n.href}
+              onClick={() => setMore(false)}
+              className={section === n.id ? "active" : ""}
+              aria-current={section === n.id ? "page" : undefined}
+            >
+              <n.icon size={20} strokeWidth={1.6} />
+              {n.label}
+            </Link>
+          ))}
+          <button
+            className={more ? "active" : ""}
+            aria-expanded={more}
+            aria-controls="more-navigation"
+            onClick={() => setMore(!more)}
+          >
+            {more ? <X size={20} /> : <Menu size={20} />}More
+          </button>
         </nav>
+        {more && (
+          <nav
+            id="more-navigation"
+            className="mobile-more"
+            aria-label="More navigation"
+          >
+            {navigation
+              .filter(
+                (n) =>
+                  !["dashboard", "learn", "practice", "design"].includes(n.id),
+              )
+              .map((n) => (
+                <Link
+                  key={n.id}
+                  href={n.href}
+                  className={n.id === section ? "active" : ""}
+                  onClick={() => setMore(false)}
+                >
+                  <n.icon size={18} />
+                  {n.label}
+                </Link>
+              ))}
+          </nav>
+        )}
+      </div>
+      {accessPending && (
+        <div className="auth-access-overlay" role="status" aria-live="polite">
+          <div className="brand-glyph">✦</div>
+          <p>Checking your workspace access…</p>
+        </div>
       )}
-    </div>
+    </>
   );
 }
 function Dashboard({
   data,
   refresh,
+  demo,
 }: {
   data: Workspace;
   refresh: () => Promise<void>;
+  demo: boolean;
 }) {
   const next = nextLesson(data);
   const mod = modules.find((m) => m.id === next.moduleId)!;
@@ -445,8 +681,9 @@ function Dashboard({
             <div>
               <h3>A fresh page. A clear starting point.</h3>
               <p>
-                This is your private local demo workspace. Pick a path, review
-                the editable sample equipment, and begin on paper.
+                {demo
+                  ? "This is your private local demo workspace. Pick a path, review the editable sample equipment, and begin on paper."
+                  : "This private workspace belongs to your AIBRY ID. Pick a path, add equipment when you are ready, and begin on paper. Demo records stay separate unless you deliberately authorize an import."}
               </p>
             </div>
             <GraduationCap size={30} className="muted" />
@@ -1629,9 +1866,11 @@ function Progress({
 function WorkspaceSettings({
   data,
   refresh,
+  session,
 }: {
   data: Workspace;
   refresh: () => Promise<void>;
+  session: AuthSession;
 }) {
   const [name, setName] = useState(data.profile.name);
   const [level, setLevel] = useState(data.profile.level);
@@ -1639,6 +1878,8 @@ function WorkspaceSettings({
   const [coachName, setCoachName] = useState(data.settings.coachName);
   const [minutes, setMinutes] = useState(data.settings.goalMinutes);
   const [confirmation, setConfirmation] = useState("");
+  const [importAuthorization, setImportAuthorization] = useState("");
+  const [importConfirmation, setImportConfirmation] = useState("");
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1679,15 +1920,147 @@ function WorkspaceSettings({
       setBusy(false);
     }
   }
+  async function importDemo(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    setStatus("");
+    try {
+      await mutate("/api/auth/import-demo", {
+        authorization: importAuthorization,
+        confirm: importConfirmation,
+      });
+      setImportAuthorization("");
+      setImportConfirmation("");
+      const importedResponse = await fetch("/api/workspace", {
+        cache: "no-store",
+      });
+      if (importedResponse.status === 401) {
+        window.dispatchEvent(new Event("midnight-session-expired"));
+        throw new Error(
+          "The import completed. Sign in again to review your records.",
+        );
+      }
+      if (importedResponse.ok) {
+        const imported = (await importedResponse.json()) as Workspace;
+        setName(imported.profile.name);
+        setLevel(imported.profile.level);
+        setPath(imported.profile.path);
+        setCoachName(imported.settings.coachName);
+        setMinutes(imported.settings.goalMinutes);
+      }
+      await refresh();
+      setStatus(
+        "The authorized demo records were moved into this private workspace. The one-time authorization cannot be used again.",
+      );
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
   return (
     <div className="settings-layout">
+      <section className="panel auth-identity-panel">
+        <div className="eyebrow">
+          {session.mode === "authenticated"
+            ? "CONNECTED IDENTITY"
+            : "DEVELOPMENT IDENTITY"}
+        </div>
+        <div className="between">
+          <div className="row">
+            <div className="auth-identity-icon">
+              <ShieldCheck size={22} />
+            </div>
+            <div>
+              <h2>
+                {session.mode === "authenticated"
+                  ? "Your AIBRY ID workspace"
+                  : "Local demo workspace"}
+              </h2>
+              <p>
+                {session.mode === "authenticated"
+                  ? "Only this verified identity can access your personal records."
+                  : "One local identity for private development. No AIBRY ID account is connected."}
+              </p>
+            </div>
+          </div>
+          <span className="chip">
+            {session.mode === "authenticated" ? "SESSION ACTIVE" : "LOCAL DEMO"}
+          </span>
+        </div>
+        {session.mode === "authenticated" && session.identity && (
+          <>
+            <dl className="auth-identity-details">
+              <div>
+                <dt>Account</dt>
+                <dd>
+                  {session.identity.name ||
+                    session.profile?.name ||
+                    "AIBRY ID account"}
+                </dd>
+              </div>
+              {session.identity.email && (
+                <div>
+                  <dt>Profile email</dt>
+                  <dd>{session.identity.email}</dd>
+                </div>
+              )}
+              <div>
+                <dt>Identity provider</dt>
+                <dd>{session.identity.issuer}</dd>
+              </div>
+              <div>
+                <dt>Immutable account subject</dt>
+                <dd>{session.identity.subject}</dd>
+              </div>
+              <div>
+                <dt>Session expires</dt>
+                <dd>
+                  {session.expiresAt
+                    ? new Date(session.expiresAt).toLocaleString()
+                    : "At the server-configured expiration"}
+                </dd>
+              </div>
+            </dl>
+            <p className="note-caption">
+              Email and display name are profile attributes. Your workspace is
+              mapped by the provider’s immutable subject.
+            </p>
+          </>
+        )}
+        {session.mode === "authenticated" ? (
+          <form method="post" action="/auth/logout">
+            <button className="btn" type="submit">
+              <LogOut size={15} />
+              Sign out
+            </button>
+            <p className="note-caption">
+              Sign-out revokes this Midnight Ink session. Your AIBRY ID provider
+              session may remain active.
+            </p>
+          </form>
+        ) : (
+          session.loginAvailable && (
+            // eslint-disable-next-line @next/next/no-html-link-for-pages -- OAuth starts with a full document navigation and must not be prefetched.
+            <a className="btn" href="/auth/aibry-id/login?returnTo=%2Fsettings">
+              <LockKeyhole size={15} />
+              Continue with AIBRY ID
+            </a>
+          )
+        )}
+      </section>
       <form className="panel" onSubmit={save}>
-        <div className="eyebrow">LOCAL WORKSPACE</div>
+        <div className="eyebrow">
+          {session.mode === "authenticated"
+            ? "PRIVATE WORKSPACE"
+            : "LOCAL WORKSPACE"}
+        </div>
         <h2>A space for your practice</h2>
         <p>
-          This explicitly labeled development workspace needs no account. It has
-          one local identity and is unavailable in production. Keep the demo
-          server on your own machine.
+          {session.mode === "authenticated"
+            ? "Your learning preferences and records belong to this signed-in account. Other AIBRY ID accounts receive separate workspaces."
+            : "This development workspace needs no account and is available on loopback only. Keep the demo server on your own machine."}
         </p>
         <div className="grid-2">
           <div className="field">
@@ -1797,15 +2170,71 @@ function WorkspaceSettings({
           <span className="chip">No competency certification</span>
         </div>
         <hr className="divider" />
-        <h3>AIBRY ID boundary</h3>
+        <h3>Identity and privacy</h3>
         <p>
-          Live identity integration is not configured. Production access is
-          blocked until verified authentication and ownership mapping are
-          implemented and tested.
+          Personal APIs require a verified server session outside local demo
+          mode. Signing in never assigns existing demo records to your account.
+          Your browser holds an HttpOnly session cookie; identity tokens and
+          session secrets are never exposed in this screen.
         </p>
       </section>
+      {session.mode === "authenticated" && session.demoImportAvailable && (
+        <form className="panel auth-import-panel" onSubmit={importDemo}>
+          <div className="eyebrow">ONE-TIME DEMO IMPORT</div>
+          <h2>Bring over an existing practice workspace.</h2>
+          <p>
+            Signing in did not give you access to the original demo records.
+            Import requires a separate one-time authorization supplied by the
+            operator, an empty destination workspace, and your explicit
+            confirmation. It replaces your learning preferences with the demo
+            preferences and moves the demo’s saved records and photos into this
+            account while preserving their relationships. Export and back up
+            both workspaces first.
+          </p>
+          <label className="label" htmlFor="demo-import-authorization">
+            One-time import authorization
+          </label>
+          <input
+            id="demo-import-authorization"
+            type="password"
+            autoComplete="off"
+            value={importAuthorization}
+            maxLength={512}
+            onChange={(e) => setImportAuthorization(e.target.value)}
+            required
+          />
+          <label
+            className="label"
+            htmlFor="demo-import-confirmation"
+            style={{ marginTop: 15 }}
+          >
+            Type IMPORT DEMO DATA to confirm ownership transfer
+          </label>
+          <input
+            id="demo-import-confirmation"
+            autoComplete="off"
+            value={importConfirmation}
+            onChange={(e) => setImportConfirmation(e.target.value)}
+            required
+          />
+          <button
+            className="btn"
+            type="submit"
+            disabled={
+              busy ||
+              !importAuthorization ||
+              importConfirmation !== "IMPORT DEMO DATA"
+            }
+            style={{ marginTop: 15 }}
+          >
+            {busy
+              ? "Checking authorization…"
+              : "Import demo data into my account"}
+          </button>
+        </form>
+      )}
       <section className="panel" style={{ borderColor: "#60423b" }}>
-        <h2>Delete your local data</h2>
+        <h2>Delete your workspace data</h2>
         <p>
           This permanently removes your saved progress, practice sessions and
           photos, equipment, designs, goals, and coaching history from this
