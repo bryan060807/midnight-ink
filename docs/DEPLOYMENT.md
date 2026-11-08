@@ -33,3 +33,5 @@ Before exposing an installation:
 For multiple application replicas/writers, replace SQLite and local photo storage through the existing repository boundary with PostgreSQL/object storage. That hosting mode is not implemented by this change.
 
 `MIDNIGHT_INK_DATA_DIR` controls local persistent files; `DATABASE_PATH` can override the database for isolated tools/tests. Keep database/photo backups consistent, protect their contents, and keep all local environment files, data, exports, and credentials out of Git.
+
+The handoff runtime-only npm audit reports no known vulnerabilities. The development lint dependency chain retains `minimatch` advisory `GHSA-g3hv-75wg-m249` (moderate glob-pattern denial of service); update compatible tooling before treating the development supply chain as fully cleared. See [testing evidence](TESTING.md#dependency-audit-at-handoff).

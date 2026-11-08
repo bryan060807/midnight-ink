@@ -84,3 +84,7 @@ Coverage includes valid code/PKCE exchange, absent/wrong/replayed state and brow
 The browser checks caught an ordinary form Origin issue under global `no-referrer`; the final policy uses `same-origin` for the application and `no-referrer` only for auth callback responses, preserving strict rejection of null/cross-site mutation origins. The final combined browser run completed successfully with these strict checks retained.
 
 Live discovery at the canonical AIBRY ID issuer was attempted from this cloud workspace and blocked by the outbound proxy with CONNECT HTTP 403. This is a network-policy gate, not evidence that the provider is unavailable or a client is registered. See [real-provider acceptance](AIBRY-ID-ACCEPTANCE.md) for the outstanding operator steps.
+
+## Dependency audit at handoff
+
+`npm audit --omit=dev` reported **zero** known production dependency vulnerabilities. The full `npm audit` reported eight moderate entries propagating from one development lint-toolchain advisory: [`GHSA-g3hv-75wg-m249`](https://github.com/advisories/GHSA-g3hv-75wg-m249), glob-pattern denial of service in transitive `minimatch` below 11.0.1, reached through TypeScript ESLint / `eslint-config-next`. This development dependency chain was inherited from the MVP; it is not the new OIDC/Jose runtime dependency. An upstream-compatible tooling update remains outstanding. No unsafe major-version override or blanket audit fix was applied as part of authentication work. Audit results are point-in-time package metadata, not production signoff.
