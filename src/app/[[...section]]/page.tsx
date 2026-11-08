@@ -40,7 +40,7 @@ export default async function Page({
     /* login explains incomplete configuration */
   }
   try {
-    requireWorkspace(
+    await requireWorkspace(
       new Request(`${origin}${destination}`, { headers: incoming }),
     );
   } catch (error) {

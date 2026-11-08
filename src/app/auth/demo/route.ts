@@ -42,7 +42,7 @@ export async function POST(request: Request): Promise<Response> {
     const token = config
       ? readCookie(request, sessionCookieName(config))
       : null;
-    if (token && config) revokeSession(hashAuthToken(token, config));
+    if (token && config) await revokeSession(hashAuthToken(token, config));
     let returnTo = "/";
     if (
       request.headers

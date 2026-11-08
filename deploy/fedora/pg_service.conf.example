@@ -1,0 +1,10 @@
+# Operator's protected libpq service configuration (not DATABASE_URL).
+# Choose an approved backup role with sufficient read access; do not assume an admin identity.
+[midnight_ink_backup]
+host=<VERIFIED_DATABASE_TLS_HOST>
+port=<VERIFIED_POSTGRES_PORT>
+dbname=midnight_ink
+user=<VERIFIED_BACKUP_ROLE>
+sslmode=verify-full
+sslrootcert=<VERIFIED_CA_PEM_PATH>
+# Password belongs in a restricted PGPASSFILE or approved credential mechanism, never this example.

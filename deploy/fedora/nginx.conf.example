@@ -1,0 +1,40 @@
+# Review/merge into the existing Fedora ingress. Not an activated configuration.
+# Replace every placeholder after verifying routing, certificates and interface addresses.
+# If Cloudflare terminates public TLS, keep its existing authenticated/verified origin transport.
+# Place the log_format in nginx's http {} context. $uri omits OIDC code/state query strings.
+log_format midnight_ink_redacted '$remote_addr [$time_local] $request_method $uri $status $body_bytes_sent';
+
+server {
+    listen <VERIFIED_FEDORA_HTTPS_BIND>:443 ssl;
+    server_name midnight-ink.aibrylabs.com;
+    ssl_certificate <VERIFIED_ORIGIN_CERTIFICATE_PATH>;
+    ssl_certificate_key <VERIFIED_ORIGIN_PRIVATE_KEY_PATH>;
+    access_log <VERIFIED_RESTRICTED_LOG_DIRECTORY>/midnight-ink-access.log midnight_ink_redacted;
+    # nginx error logs may include complete upstream URLs; disable request error logging
+    # for this vhost unless a separately reviewed redaction mechanism is installed.
+    error_log /dev/null crit;
+    client_max_body_size 9m;
+
+    # Reject alternate authorities rather than turning their requests into trusted hosts.
+    if ($http_host !~* "^midnight-ink\.aibrylabs\.com(?::443)?$") { return 421; }
+
+    location / {
+        proxy_pass http://<VERIFIED_WINDOWS_LAN_IPV4>:3031;
+        proxy_http_version 1.1;
+        proxy_set_header Host midnight-ink.aibrylabs.com;
+        # Browser Origin passes through unchanged by default; never set it to APP_ORIGIN.
+        proxy_set_header Forwarded "";
+        proxy_set_header X-Forwarded-For "";
+        proxy_set_header X-Forwarded-Host "";
+        proxy_set_header X-Forwarded-Proto "";
+        proxy_set_header X-Forwarded-Port "";
+        proxy_set_header X-Real-IP "";
+        proxy_set_header X-User "";
+        proxy_set_header X-Email "";
+        proxy_set_header X-Auth-Request-User "";
+        proxy_set_header X-Auth-Request-Email "";
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_read_timeout 60s;
+    }
+}

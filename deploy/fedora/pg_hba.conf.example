@@ -1,0 +1,6 @@
+# Merge only after verifying the real server, TLS, source NAT and Windows IPv4.
+# This is a fragment, not a replacement for the server's existing pg_hba.conf.
+# Order matters: review earlier broad rules and preserve unrelated applications.
+hostssl midnight_ink midnight_ink_app,midnight_ink_migrator <VERIFIED_WINDOWS_SOURCE_IPV4>/32 scram-sha-256
+# Do not use trust, hostnossl, 0.0.0.0/0, or disable certificate verification.
+# PostgreSQL listen_addresses and Fedora firewall must also select verified interfaces/sources.

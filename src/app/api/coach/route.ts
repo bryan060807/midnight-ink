@@ -1,3 +1,4 @@
+import { DatabaseError } from "@/lib/database";
 import { coach, coachRequestSchema, type CoachContext } from "@/lib/coach";
 import { ApiError, requireWorkspace } from "@/lib/auth";
 import { getWorkspace, saveCoaching } from "@/lib/db";
@@ -13,7 +14,7 @@ const MAX_BODY_BYTES = 16_384;
 
 export async function POST(request: Request): Promise<Response> {
   try {
-    const profileId = requireWorkspace(request);
+    const profileId = await requireWorkspace(request);
     const now = Date.now();
     for (const [id, window] of rateWindows) if (now - window.startedAt >= WINDOW_MS) rateWindows.delete(id);
     const current = rateWindows.get(profileId) ?? { startedAt: now, count: 0 };
@@ -25,11 +26,12 @@ export async function POST(request: Request): Promise<Response> {
     let raw: unknown;
     try { raw = JSON.parse(text); } catch { throw new ApiError(400, "The question could not be read as JSON."); }
     const input = coachRequestSchema.parse(raw);
-    const workspace = getWorkspace(profileId);
+    const workspace = await getWorkspace(profileId);
     const result = await coach(input, workspace as CoachContext);
-    saveCoaching(profileId, { question: input.question, response: result });
+    await saveCoaching(profileId, { question: input.question, response: result });
     return Response.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
+    if (error instanceof DatabaseError) return Response.json({error:"The database is unavailable. Try again later."},{status:503,headers:{"Cache-Control":"no-store"}});
     if (error instanceof ApiError) return Response.json({ error: error.message }, { status: error.status });
     if (error instanceof ZodError) return Response.json({ error: error.issues[0]?.message ?? "Check your question and try again." }, { status: 400 });
     return Response.json({ error: "Your coaching request could not be saved. Try again." }, { status: 500 });

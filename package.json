@@ -6,15 +6,18 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "dev": "next dev --hostname 127.0.0.1",
+    "dev": "node scripts/server.mjs --dev",
     "build": "next build",
-    "start": "next start --hostname 127.0.0.1",
+    "start": "node scripts/server.mjs",
     "lint": "eslint . && tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "playwright test && playwright test --config playwright.auth.config.ts",
     "db:migrate": "tsx scripts/db.ts migrate",
     "db:seed": "tsx scripts/db.ts seed",
-    "db:reset": "tsx scripts/db.ts reset"
+    "db:reset": "tsx scripts/db.ts reset",
+    "db:import-sqlite": "tsx scripts/import-sqlite.ts",
+    "test:unit": "vitest run tests/cartridge.test.ts tests/coach.test.ts tests/design.test.ts tests/auth-config.test.ts",
+    "test:db": "vitest run tests/backend.test.ts tests/api-security.test.ts tests/auth-oidc.test.ts tests/auth-isolation.test.ts tests/demo-import.test.ts tests/postgres-concurrency.test.ts tests/sqlite-import.test.ts tests/uploads-postgres.test.ts tests/auth-transfer-race.test.ts"
   },
   "dependencies": {
     "@next/env": "16.4.5",
@@ -22,6 +25,7 @@
     "jose": "6.2.15",
     "lucide-react": "latest",
     "next": "latest",
+    "pg": "8.23.1",
     "react": "latest",
     "react-dom": "latest",
     "sharp": "latest",
@@ -31,6 +35,7 @@
   "devDependencies": {
     "@playwright/test": "latest",
     "@types/node": "latest",
+    "@types/pg": "8.23.1",
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "eslint": "latest",
