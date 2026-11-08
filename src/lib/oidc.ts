@@ -310,7 +310,7 @@ export async function beginLogin(request: Request, options: OidcOptions = {}) {
     config = getRequiredAuthConfig();
     assertTrustedHost(request, config);
     throttle("login");
-    cleanupAuth();
+    await cleanupAuth();
     const query = new URL(request.url).searchParams;
     if (query.getAll("returnTo").length > 1)
       return loginFailure("login_failed", config);
@@ -320,7 +320,7 @@ export async function beginLogin(request: Request, options: OidcOptions = {}) {
       nonce = opaque(),
       verifier = opaque(),
       browser = opaque();
-    createLoginTransaction({
+    await createLoginTransaction({
       stateHash: hashAuthToken(state, config),
       browserHash: hashAuthToken(browser, config),
       nonce,
@@ -377,7 +377,7 @@ export async function finishLogin(request: Request, options: OidcOptions = {}) {
       !/^[A-Za-z0-9_-]{43}$/.test(browser)
     )
       return loginFailure("login_failed", config);
-    const attempt = consumeLoginTransaction(
+    const attempt = await consumeLoginTransaction(
       hashAuthToken(state, config),
       hashAuthToken(browser, config),
     );
@@ -440,12 +440,12 @@ export async function finishLogin(request: Request, options: OidcOptions = {}) {
       metadata,
       options,
     );
-    const profile = upsertIdentity(identity);
+    const profile = await upsertIdentity(identity);
     const token = opaque(),
       expiresAt = Date.now() + config.sessionTtlMs;
-    createSession(profile.id, hashAuthToken(token, config), expiresAt);
+    await createSession(profile.id, hashAuthToken(token, config), expiresAt);
     const previous = readCookie(request, sessionCookieName(config));
-    if (previous) revokeSession(hashAuthToken(previous, config));
+    if (previous) await revokeSession(hashAuthToken(previous, config));
     const response = NextResponse.redirect(
       new URL(safeReturnTo(attempt.returnTo), config.appOrigin),
       303,
@@ -479,8 +479,8 @@ export async function logout(request: Request) {
     assertTrustedHost(request, config);
     assertSameOrigin(request, config);
     const token = readCookie(request, sessionCookieName(config));
-    if (token) revokeSession(hashAuthToken(token, config));
-    cleanupAuth();
+    if (token) await revokeSession(hashAuthToken(token, config));
+    await cleanupAuth();
     const response = new NextResponse(null, {
       status: 303,
       headers: { Location: "/login?loggedOut=1", "Cache-Control": "no-store" },

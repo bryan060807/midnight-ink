@@ -1,10 +1,14 @@
+import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { defineConfig, devices } from "@playwright/test";
 import { existsSync } from "node:fs";
 const executablePath =
   process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
   (existsSync("/usr/bin/chromium") ? "/usr/bin/chromium" : undefined);
-const dataDir = `.data/auth-e2e-${process.pid}`;
+const databaseFixtureFile = path.join(tmpdir(), `midnight-browser-fixture-${process.pid}-auth.json`);
 export default defineConfig({
+  globalTeardown: './e2e/database-teardown.ts',
+  metadata: { databaseFixtureFile },
   testDir: "./e2e",
   testMatch: "**/auth.spec.ts",
   fullyParallel: false,
@@ -35,13 +39,12 @@ export default defineConfig({
       },
     },
     {
-      command: "npm run dev -- --port 3101",
+      command: "node --import tsx scripts/test-database.ts --port 3101",
       url: "http://localhost:3101/api/health",
       reuseExistingServer: false,
       timeout: 120_000,
       env: {
-        MIDNIGHT_INK_DATA_DIR: dataDir,
-        DATABASE_PATH: `${dataDir}/studio.sqlite`,
+        MIDNIGHT_INK_TEST_FIXTURE_FILE: databaseFixtureFile,
         LOCAL_DEMO_ENABLED: "false",
         ROOK_PROVIDER: "offline",
         AIBRY_ID_ISSUER: "http://127.0.0.1:3211",

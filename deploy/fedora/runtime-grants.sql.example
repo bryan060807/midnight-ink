@@ -1,0 +1,10 @@
+-- Apply separately to midnight_ink after migrations, using the verified operator/migrator.
+\set ON_ERROR_STOP on
+SELECT current_user, current_database();
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO midnight_ink_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO midnight_ink_app;
+-- Only the migrator may alter migration/seed state and bundled educational resources.
+REVOKE INSERT, UPDATE, DELETE ON TABLE "SchemaMigration", "SeedMarker",
+    "LearningModule", "Lesson", "Exercise", "TechniqueCard", "ReferenceResource"
+    FROM midnight_ink_app;
+-- Health/schema verification retains SELECT; no runtime schema CREATE is granted.

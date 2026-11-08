@@ -17,7 +17,7 @@ export type RequestIdentity = {
   mode: "demo" | "authenticated";
   profileId: string;
   expiresAt: number | null;
-  identity: ReturnType<typeof getIdentity>;
+  identity: Awaited<ReturnType<typeof getIdentity>>;
 };
 function mutable(request: Request) {
   return !["GET", "HEAD", "OPTIONS"].includes(request.method);
@@ -52,7 +52,7 @@ function demoRequestGuard(request: Request) {
       throw new ApiError(403, "Cross-origin changes are not allowed.");
   }
 }
-export function getRequestIdentity(request?: Request): RequestIdentity {
+export async function getRequestIdentity(request?: Request): Promise<RequestIdentity> {
   const config = getAuthConfig();
   if (process.env.NODE_ENV === "production" && !config) getRequiredAuthConfig();
   const cookies = request?.headers.get("cookie") || "";
@@ -65,11 +65,11 @@ export function getRequestIdentity(request?: Request): RequestIdentity {
       throw new ApiError(401, "Your session has expired. Sign in again.");
     assertTrustedHost(request, config);
     const token = readCookie(request, sessionCookieName(config));
-    const session = token ? findSession(hashAuthToken(token, config)) : null;
+    const session = token ? await findSession(hashAuthToken(token, config)) : null;
     if (!session)
       throw new ApiError(401, "Your session has expired. Sign in again.");
     if (mutable(request)) assertSameOrigin(request, config);
-    const identity = getIdentity(session.profileId);
+    const identity = await getIdentity(session.profileId);
     if (!identity || identity.issuer !== config.issuer)
       throw new ApiError(
         401,
@@ -102,8 +102,8 @@ export function getRequestIdentity(request?: Request): RequestIdentity {
     );
   throw new ApiError(401, "Sign in with AIBRY ID to open your workspace.");
 }
-export function requireWorkspace(request?: Request): string {
-  return getRequestIdentity(request).profileId;
+export async function requireWorkspace(request?: Request): Promise<string> {
+  return (await getRequestIdentity(request)).profileId;
 }
 export function getSessionTokenHash(
   request: Request,

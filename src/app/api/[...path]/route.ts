@@ -1,9 +1,10 @@
+import { DatabaseError } from "@/lib/database";
 import { NextResponse } from 'next/server';
 import { ZodError } from 'zod';
 import { ApiError, requireWorkspace } from '../../../lib/auth';
-import { getDatabase, getWorkspace, createRecord, updateRecord, deleteRecord, completeLesson, deleteUserData } from '../../../lib/db';
+import { getDatabase, getWorkspace, createRecord, updateRecord, deleteRecord, completeLesson, deleteUserData, verifyDatabaseSchema } from '../../../lib/db';
 import { profileSchema, settingsSchema } from '../../../lib/schemas';
-import { readPhoto, removePhotos, savePhoto, validateImage } from '../../../lib/uploads';
+import { readPhoto, removePhotos, savePhoto, validateImage, flushPhotoDeletionQueue } from '../../../lib/uploads';
 import { parseDesign } from '../../../lib/design';
 import { worksheetSvg } from '../../../lib/worksheets';
 import { exercises } from '../../../lib/curriculum';
@@ -51,38 +52,52 @@ async function handle(request:Request,context:{params:Promise<{path:string[]}>})
     const [resource,id,action]=segments;
     if(resource==='health'&&request.method==='GET') {
       const config=getAuthConfig();
-      if(!config && (process.env.NODE_ENV==='production' || process.env.LOCAL_DEMO_ENABLED==='false'))return json({status:'blocked',database:'not checked',authentication:'not configured; production demo fallback is disabled'},503);
+      if(!config && (process.env.NODE_ENV==='production' || process.env.LOCAL_DEMO_ENABLED==='false')) return json({status:'blocked',database:'not checked',authentication:'not configured; production demo fallback is disabled'},503);
       const coachProvider=process.env.ROOK_PROVIDER==='openai'&&process.env.OPENAI_API_KEY?'openai':'offline';
-      const db=getDatabase();db.prepare('SELECT 1').get();return json({status:'ok',database:'sqlite',mode:config?'oidc':'local-demo',authentication:config?'configured; real-provider acceptance is separate':'local demo',coachProvider,ai:coachProvider==='openai'?'optional provider configured':'offline'});
+      const db=getDatabase();
+      await db.query('SELECT 1');
+      try { await verifyDatabaseSchema(db); } catch { throw new ApiError(503,'Database migrations are not ready. Run db:migrate explicitly.'); }
+      // Committed photo deletions remain retryable after process restarts.
+      const cleanup=await flushPhotoDeletionQueue(db);
+      return json({status:'ok',database:'postgresql',schema:'current',mode:config?'oidc':'local-demo',authentication:config?'configured; real-provider acceptance is separate':'local demo',coachProvider,ai:coachProvider==='openai'?'optional provider configured':'offline',photoCleanup:cleanup.failed?'pending':'complete'});
     }
-    const profileId=requireWorkspace(request);
+    const profileId=await requireWorkspace(request);
     const db=getDatabase();
     if(resource==='worksheets'&&id&&request.method==='GET') {
       if(!exercises.some(exercise=>exercise.id===id))throw new ApiError(404,'Worksheet not found.');
       return new NextResponse(worksheetSvg(id),{headers:{'Content-Type':'image/svg+xml; charset=utf-8','Content-Disposition':`attachment; filename="midnight-ink-${id}.svg"`,'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}});
     }
-    if(resource==='workspace'&&request.method==='GET')return json(getWorkspace(profileId));
-    if(resource==='export'&&request.method==='GET')return NextResponse.json({formatVersion:1,exportedAt:new Date().toISOString(),...getWorkspace(profileId)},{headers:{'Content-Disposition':'attachment; filename="midnight-ink-records.json"','Cache-Control':'no-store'}});
+    if(resource==='workspace'&&request.method==='GET')return json(await getWorkspace(profileId));
+    if(resource==='export'&&request.method==='GET')return NextResponse.json({formatVersion:1,exportedAt:new Date().toISOString(),...await getWorkspace(profileId)},{headers:{'Content-Disposition':'attachment; filename="midnight-ink-records.json"','Cache-Control':'no-store'}});
     if(resource==='data'&&request.method==='DELETE'){
       const input=await body(request);if(input?.confirm!=='DELETE')throw new ApiError(400,'Confirm deletion with DELETE.');
-      removePhotos(profileId);return json(deleteUserData(profileId));
+      const result=await deleteUserData(profileId);
+      const cleanup=await flushPhotoDeletionQueue(db).catch(()=>({failed:1}));
+      return json({...result,fileCleanup:cleanup.failed?'pending':'complete'});
     }
     if(resource==='profile'&&request.method==='PATCH') {
       const patch=profileSchema.parse(await body(request));
-      const current=db.prepare('SELECT * FROM Profile WHERE id=?').get(profileId)!;
-      db.prepare('UPDATE Profile SET name=?,level=?,path=?,updatedAt=? WHERE id=?').run(patch.name??String(current.name),patch.level??String(current.level),patch.path??String(current.path),new Date().toISOString(),profileId);
-      return json(db.prepare('SELECT * FROM Profile WHERE id=?').get(profileId));
+      const result=await db.transaction(async tx=>{
+        const current=(await tx.query('SELECT * FROM "Profile" WHERE "id"=$1 FOR UPDATE',[profileId])).rows[0];
+        if(!current)throw new ApiError(404,'Workspace not found.');
+        return (await tx.query('UPDATE "Profile" SET "name"=$1,"level"=$2,"path"=$3,"updatedAt"=$4 WHERE "id"=$5 RETURNING *',[patch.name??String(current.name),patch.level??String(current.level),patch.path??String(current.path),new Date().toISOString(),profileId])).rows[0];
+      });
+      return json(result);
     }
     if(resource==='settings'&&request.method==='PATCH') {
       const patch=settingsSchema.parse(await body(request));
-      const current=db.prepare('SELECT * FROM UserSettings WHERE profileId=?').get(profileId)!;
-      db.prepare('UPDATE UserSettings SET coachName=?,goalMinutes=?,updatedAt=? WHERE profileId=?').run(patch.coachName??String(current.coachName),patch.goalMinutes??Number(current.goalMinutes),new Date().toISOString(),profileId);
-      return json(db.prepare('SELECT coachName,goalMinutes FROM UserSettings WHERE profileId=?').get(profileId));
+      const result=await db.transaction(async tx=>{
+        await tx.query('SELECT "id" FROM "Profile" WHERE "id"=$1 FOR UPDATE',[profileId]);
+        const current=(await tx.query('SELECT * FROM "UserSettings" WHERE "profileId"=$1 FOR UPDATE',[profileId])).rows[0];
+        if(!current)throw new ApiError(404,'Workspace settings not found.');
+        return (await tx.query('UPDATE "UserSettings" SET "coachName"=$1,"goalMinutes"=$2,"updatedAt"=$3 WHERE "profileId"=$4 RETURNING "coachName","goalMinutes"',[patch.coachName??String(current.coachName),patch.goalMinutes??Number(current.goalMinutes),new Date().toISOString(),profileId])).rows[0];
+      });
+      return json(result);
     }
-    if(resource==='lessons'&&id&&action==='complete'&&request.method==='POST')return json(completeLesson(profileId,id));
+    if(resource==='lessons'&&id&&action==='complete'&&request.method==='POST')return json(await completeLesson(profileId,id));
     if(resource==='photos') {
-      if(id&&request.method==='GET'){const photo=readPhoto(profileId,id);return new NextResponse(new Uint8Array(photo.buffer),{headers:{'Content-Type':photo.mimeType,'Content-Disposition':'inline','Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}});}
-      if(id&&request.method==='DELETE'){removePhotos(profileId,undefined,id);return json({ok:true});}
+      if(id&&request.method==='GET'){const photo=await readPhoto(profileId,id);return new NextResponse(new Uint8Array(photo.buffer),{headers:{'Content-Type':photo.mimeType,'Content-Disposition':'inline','Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}});}
+      if(id&&request.method==='DELETE'){await removePhotos(profileId,undefined,id);return json({ok:true});}
       if(!id&&request.method==='POST') {
         const type=request.headers.get('content-type')||'';
         if(!type.startsWith('multipart/form-data'))throw new ApiError(415,'Send multipart form data.');
@@ -96,12 +111,13 @@ async function handle(request:Request,context:{params:Promise<{path:string[]}>})
     const tableMap:Record<string,'Equipment'|'PracticeSession'|'DesignProject'|'Goal'|undefined>={equipment:'Equipment',sessions:'PracticeSession',designs:'DesignProject',goals:'Goal'};
     const table=Object.hasOwn(tableMap,resource)?tableMap[resource]:undefined;
     if(table){
-      if(request.method==='POST'&&!id)return json(createRecord(table,profileId,table==='DesignProject'?await designBody(request):await body(request)),201);
-      if(request.method==='PATCH'&&id)return json(updateRecord(table,profileId,id,table==='DesignProject'?await designBody(request):await body(request)));
-      if(request.method==='DELETE'&&id){if(table==='PracticeSession')removePhotos(profileId,id);return json(deleteRecord(table,profileId,id));}
+      if(request.method==='POST'&&!id)return json(await createRecord(table,profileId,table==='DesignProject'?await designBody(request):await body(request)),201);
+      if(request.method==='PATCH'&&id)return json(await updateRecord(table,profileId,id,table==='DesignProject'?await designBody(request):await body(request)));
+      if(request.method==='DELETE'&&id){const result=await deleteRecord(table,profileId,id);if(table==='PracticeSession')await flushPhotoDeletionQueue(db).catch(()=>undefined);return json(result);}
     }
     throw new ApiError(404,'Endpoint not found.');
   }catch(error){
+    if(error instanceof DatabaseError)return json({error:'The database is unavailable. Check PostgreSQL configuration, connectivity, and migrations.'},503);
     if(error instanceof ApiError)return json({error:error.message},error.status);
     if(error instanceof ZodError)return json({error:'Please check the entered fields.',fields:error.issues.map(issue=>({path:issue.path.join('.'),message:issue.message}))},400);
     return json({error:'The operation could not be completed. Refresh the workspace to check the saved state, then try again.'},500);

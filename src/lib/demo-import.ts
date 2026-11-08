@@ -1,10 +1,10 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { ApiError } from "./errors";
-import { getDatabase } from "./db";
-import { getIdentity } from "./auth-store";
+import { getDatabase, type Database } from "./db";
+import { getIdentity, type AuthProfile } from "./auth-store";
 
 const sourceId = "local-demo";
+// SQL identifiers come only from this fixed server-owned list.
 const ownedTables = [
   "Equipment",
   "LessonProgress",
@@ -15,6 +15,13 @@ const ownedTables = [
   "CoachingSession",
   "Goal",
 ] as const;
+
+interface SettingsRow {
+  profileId: string;
+  coachName: string;
+  goalMinutes: number;
+  updatedAt: string;
+}
 
 function verifyAuthorization(authorization: string) {
   const expected = process.env.DEMO_IMPORT_TOKEN_HASH;
@@ -33,105 +40,109 @@ function verifyAuthorization(authorization: string) {
 
 /**
  * Deliberate, separately authorized import. No login can invoke it implicitly.
- * File names do not change: photo bytes stay in the same private storage directory;
- * their owner and session owner move together within one SQLite transaction.
+ * IDs and photo filenames stay unchanged; parents and children transfer in one
+ * PostgreSQL transaction. Source profile/settings and recovery receipt remain.
  */
-export function importDemoData(
+export async function importDemoData(
   targetProfileId: string,
   authorization: string,
-  db: DatabaseSync = getDatabase(),
+  db: Database = getDatabase(),
 ) {
-  if (targetProfileId === sourceId || !getIdentity(targetProfileId, db))
+  if (targetProfileId === sourceId || !(await getIdentity(targetProfileId, db)))
     throw new ApiError(
       403,
       "Sign in with a verified identity before importing demo data.",
     );
   verifyAuthorization(authorization);
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    if (
-      db
-        .prepare(
-          "SELECT sourceProfileId FROM DemoImportReceipt WHERE sourceProfileId=?",
-        )
-        .get(sourceId)
-    )
+  return db.transaction(async (tx) => {
+    // One global claim, including concurrent imports into different accounts.
+    await tx.query(
+      "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+      ["midnight-ink:demo-import:local-demo"],
+    );
+    const receipt = await tx.query(
+      'SELECT "sourceProfileId" FROM "DemoImportReceipt" WHERE "sourceProfileId"=$1',
+      [sourceId],
+    );
+    if (receipt.rows.length)
       throw new ApiError(409, "This demo workspace has already been imported.");
-    const source = db.prepare("SELECT * FROM Profile WHERE id=?").get(sourceId);
-    const target = db
-      .prepare("SELECT * FROM Profile WHERE id=?")
-      .get(targetProfileId);
-    const sourceSettings = db
-      .prepare("SELECT * FROM UserSettings WHERE profileId=?")
-      .get(sourceId);
-    const targetSettings = db
-      .prepare("SELECT * FROM UserSettings WHERE profileId=?")
-      .get(targetProfileId);
+
+    // Lock in stable order. Profile FK checks make concurrent owned-record
+    // inserts wait here, keeping the empty-target check and transfer atomic.
+    const profiles = (
+      await tx.query<AuthProfile>(
+        'SELECT * FROM "Profile" WHERE "id"=ANY($1::text[]) ORDER BY "id" FOR UPDATE',
+        [[sourceId, targetProfileId]],
+      )
+    ).rows;
+    const source = profiles.find((row) => row.id === sourceId);
+    const target = profiles.find((row) => row.id === targetProfileId);
+    const settings = (
+      await tx.query<SettingsRow>(
+        'SELECT * FROM "UserSettings" WHERE "profileId"=ANY($1::text[]) ORDER BY "profileId" FOR UPDATE',
+        [[sourceId, targetProfileId]],
+      )
+    ).rows;
+    const sourceSettings = settings.find((row) => row.profileId === sourceId);
+    const targetSettings = settings.find(
+      (row) => row.profileId === targetProfileId,
+    );
     if (!source || !target || !sourceSettings || !targetSettings)
       throw new ApiError(
         404,
         "The source or destination workspace could not be found.",
       );
+    if (!(await getIdentity(targetProfileId, tx)))
+      throw new ApiError(
+        403,
+        "Sign in with a verified identity before importing demo data.",
+      );
     for (const table of ownedTables) {
-      if (
-        Number(
-          db
-            .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE profileId=?`)
-            .get(targetProfileId)?.n,
-        ) !== 0
-      )
+      const existing = await tx.query(
+        `SELECT 1 FROM "${table}" WHERE "profileId"=$1 LIMIT 1`,
+        [targetProfileId],
+      );
+      if (existing.rows.length)
         throw new ApiError(
           409,
           "Import requires an empty authenticated workspace. Export or preserve existing work before using an operator-assisted migration.",
         );
     }
-    // Defensive integrity check: dependent rows must belong to the same owner as
-    // their parent before transfer. Foreign keys alone do not encode ownership.
-    const invalidChild =
-      db
-        .prepare(
-          "SELECT 1 FROM PracticePhoto p JOIN PracticeSession s ON s.id=p.sessionId WHERE (p.profileId=? OR s.profileId=?) AND p.profileId<>s.profileId LIMIT 1",
-        )
-        .get(sourceId, sourceId) ||
-      db
-        .prepare(
-          "SELECT 1 FROM SkillAssessment a JOIN PracticeSession s ON s.id=a.sessionId WHERE (a.profileId=? OR s.profileId=?) AND a.profileId<>s.profileId LIMIT 1",
-        )
-        .get(sourceId, sourceId);
-    if (invalidChild)
+    // Defensive review for installations imported from a historical schema.
+    // The current composite foreign keys also enforce this invariant at commit.
+    const invalidPhoto = await tx.query(
+      'SELECT 1 FROM "PracticePhoto" p JOIN "PracticeSession" s ON s."id"=p."sessionId" WHERE (p."profileId"=$1 OR s."profileId"=$1) AND p."profileId"<>s."profileId" LIMIT 1',
+      [sourceId],
+    );
+    const invalidAssessment = await tx.query(
+      'SELECT 1 FROM "SkillAssessment" a JOIN "PracticeSession" s ON s."id"=a."sessionId" WHERE (a."profileId"=$1 OR s."profileId"=$1) AND a."profileId"<>s."profileId" LIMIT 1',
+      [sourceId],
+    );
+    if (invalidPhoto.rows.length || invalidAssessment.rows.length)
       throw new ApiError(
         409,
         "The demo workspace needs an operator integrity review before import.",
       );
+
+    // The composite parent/owner constraints are deferred only until this
+    // transaction commits, so parent and children can move without breaking IDs.
+    await tx.query("SET CONSTRAINTS ALL DEFERRED");
     const counts: Record<string, number> = {};
     for (const table of ownedTables) {
-      counts[table] = Number(
-        db
-          .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE profileId=?`)
-          .get(sourceId)?.n ?? 0,
+      const result = await tx.query(
+        `UPDATE "${table}" SET "profileId"=$1 WHERE "profileId"=$2`,
+        [targetProfileId, sourceId],
       );
-      db.prepare(`UPDATE ${table} SET profileId=? WHERE profileId=?`).run(
-        targetProfileId,
-        sourceId,
-      );
+      counts[table] = result.rowCount ?? 0;
     }
     const iso = new Date().toISOString();
-    db.prepare(
-      "UPDATE Profile SET name=?,level=?,path=?,updatedAt=? WHERE id=?",
-    ).run(
-      String(source.name),
-      String(source.level),
-      String(source.path),
-      iso,
-      targetProfileId,
+    await tx.query(
+      'UPDATE "Profile" SET "name"=$1,"level"=$2,"path"=$3,"updatedAt"=$4 WHERE "id"=$5',
+      [source.name, source.level, source.path, iso, targetProfileId],
     );
-    db.prepare(
-      "UPDATE UserSettings SET coachName=?,goalMinutes=?,updatedAt=? WHERE profileId=?",
-    ).run(
-      String(sourceSettings.coachName),
-      Number(sourceSettings.goalMinutes),
-      iso,
-      targetProfileId,
+    await tx.query(
+      'UPDATE "UserSettings" SET "coachName"=$1,"goalMinutes"=$2,"updatedAt"=$3 WHERE "profileId"=$4',
+      [sourceSettings.coachName, sourceSettings.goalMinutes, iso, targetProfileId],
     );
     const details = {
       recordCounts: counts,
@@ -141,13 +152,10 @@ export function importDemoData(
       sourceSettings,
     };
     const createdAt = Date.now();
-    db.prepare(
-      "INSERT INTO DemoImportReceipt(sourceProfileId,targetProfileId,createdAt,details) VALUES(?,?,?,?)",
-    ).run(sourceId, targetProfileId, createdAt, JSON.stringify(details));
-    db.exec("COMMIT");
+    await tx.query(
+      'INSERT INTO "DemoImportReceipt"("sourceProfileId","targetProfileId","createdAt","details") VALUES($1,$2,$3,$4::jsonb)',
+      [sourceId, targetProfileId, createdAt, JSON.stringify(details)],
+    );
     return { ok: true, imported: counts, createdAt };
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  }
+  });
 }

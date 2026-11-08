@@ -1,3 +1,4 @@
+import { DatabaseError } from "@/lib/database";
 import { getRequestIdentity, ApiError } from "@/lib/auth";
 import { importDemoData } from "@/lib/demo-import";
 export const runtime = "nodejs";
@@ -5,7 +6,7 @@ export const dynamic = "force-dynamic";
 const attempts = new Map<string, { count: number; startedAt: number }>();
 export async function POST(request: Request): Promise<Response> {
   try {
-    const session = getRequestIdentity(request);
+    const session = await getRequestIdentity(request);
     if (session.mode !== "authenticated")
       throw new ApiError(401, "Sign in before importing authorized demo data.");
     const now = Date.now();
@@ -64,7 +65,7 @@ export async function POST(request: Request): Promise<Response> {
         400,
         "Confirm this import with the separately issued authorization.",
       );
-    const receipt = importDemoData(session.profileId, input.authorization);
+    const receipt = await importDemoData(session.profileId, input.authorization);
     return Response.json(
       { ok: true, receipt },
       { headers: { "Cache-Control": "no-store" } },
@@ -78,7 +79,7 @@ export async function POST(request: Request): Promise<Response> {
             : "Demo data could not be imported. No automatic claim is performed.",
       },
       {
-        status: error instanceof ApiError ? error.status : 500,
+        status: error instanceof DatabaseError ? 503 : error instanceof ApiError ? error.status : 500,
         headers: { "Cache-Control": "no-store" },
       },
     );

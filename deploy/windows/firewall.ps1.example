@@ -1,0 +1,16 @@
+# Operator-run example in an elevated PowerShell, after verifying these exact addresses.
+# Do not execute while placeholders remain. Do not broaden RemoteAddress to Any or a LAN subnet.
+$WindowsInterface = '<VERIFIED_WINDOWS_LAN_IPV4>'
+$FedoraIngress = '<VERIFIED_FEDORA_INGRESS_SOURCE_IPV4>'
+if ($WindowsInterface.StartsWith('<') -or $FedoraIngress.StartsWith('<')) {
+    throw 'Verify and replace the Windows interface and Fedora ingress source first.'
+}
+[void][System.Net.IPAddress]::Parse($WindowsInterface)
+[void][System.Net.IPAddress]::Parse($FedoraIngress)
+Get-NetFirewallRule -DisplayName 'Midnight Ink from Fedora ingress' -ErrorAction SilentlyContinue |
+    Get-NetFirewallAddressFilter
+# Review any existing rule before creating/replacing it. This example never removes existing rules.
+New-NetFirewallRule -DisplayName 'Midnight Ink from Fedora ingress' `
+    -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3031 `
+    -LocalAddress $WindowsInterface -RemoteAddress $FedoraIngress -Profile Private
+# Verify effective rules and the active network profile; another broad rule could still permit access.

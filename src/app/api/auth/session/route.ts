@@ -1,3 +1,4 @@
+import { DatabaseError } from "@/lib/database";
 import { getRequestIdentity, ApiError } from "@/lib/auth";
 import { getAuthConfig, assertTrustedHost } from "@/lib/auth-config";
 import { getDatabase } from "@/lib/db";
@@ -13,18 +14,11 @@ export async function GET(request: Request): Promise<Response> {
       loginAvailable = true;
       configurationValid = true;
     }
-    const session = getRequestIdentity(request);
-    const profile = getDatabase()
-      .prepare(
-        "SELECT id,name,level,path,createdAt,updatedAt FROM Profile WHERE id=?",
-      )
-      .get(session.profileId);
+    const session = await getRequestIdentity(request);
+    const db = getDatabase();
+    const profile = (await db.query('SELECT "id","name","level","path","createdAt","updatedAt" FROM "Profile" WHERE "id"=$1',[session.profileId])).rows[0];
     if (!profile) throw new ApiError(401, "Sign in again.");
-    const claimed = getDatabase()
-      .prepare(
-        "SELECT sourceProfileId FROM DemoImportReceipt WHERE sourceProfileId=?",
-      )
-      .get("local-demo");
+    const claimed = (await db.query('SELECT "sourceProfileId" FROM "DemoImportReceipt" WHERE "sourceProfileId"=$1',['local-demo'])).rows[0];
     return Response.json(
       {
         authenticated: session.mode === "authenticated",
@@ -58,7 +52,7 @@ export async function GET(request: Request): Promise<Response> {
             : "configuration",
       },
       {
-        status: error instanceof ApiError && error.status === 403 ? 403 : 200,
+        status: error instanceof DatabaseError ? 503 : error instanceof ApiError && error.status === 403 ? 403 : error instanceof ApiError && error.status === 503 ? 503 : 200,
         headers: { "Cache-Control": "no-store", Vary: "Cookie" },
       },
     );

@@ -1,10 +1,11 @@
 # Verification
 
-Use Node.js 24+ and install the locked dependencies before running checks. No test needs an external account or paid API.
+Use Node.js 24+ and `npm ci`. No automated test needs a real identity-provider account or paid API. Persistence and browser tests require an explicitly supplied `TEST_DATABASE_URL` for a disposable PostgreSQL database with `test` as an underscore-separated name component, for example `midnight_ink_test`. The role must be able to create/drop test schemas in that database. Never use an existing application, AIBRY ID or other service database. There is no fallback to `DATABASE_URL` or SQLite.
+
+Supply the test URL through protected local environment configuration, never a committed value or a pasted production credential. Verified TLS is the default; an explicitly configured `sslmode=disable` is accepted only for trusted loopback test connections. Pure unit checks do not need PostgreSQL:
 
 ```bash
-npm run db:migrate
-npm run db:seed
+npm run test:unit
 npm run lint
 npm test
 npm run build
@@ -17,9 +18,9 @@ npm run test:e2e
 
 Vitest covers migrations/foreign keys, idempotent seeds and preserved edits/deletions, equipment CRUD/reopen, owner isolation, unique lesson completion, practice/assessment CRUD, relationship validation, design save/load and document limits, user-data deletion, loopback/demo/production restrictions, cross-origin changes, image signatures/size/decode/metadata stripping/path traversal, cartridge interpretation, curated retrieval, offline coaching, and deterministic provider failure/success handling.
 
-Backend tests create isolated temporary databases and remove them afterward. They do not use an existing local learning workspace. Provider tests inject mock responses and never call the live service.
+Backend tests create random `test_<pid>_<hex>` schemas in the explicit disposable PostgreSQL database and remove them afterward. They migrate/seed those isolated schemas, use temporary photo directories, and do not use an existing learning workspace. Provider tests inject mock responses and never call the live service. The unchanged original SQLite migrations are exercised only by legacy-import fixtures; production application data access uses PostgreSQL exclusively.
 
-The first Playwright suite starts its own server on port **3100**, with fresh `.data/studio-e2e-*` storage, and refuses to reuse an existing server. `npm run test:e2e` then runs the separate authentication config sequentially: app port **3101**, generated-key mock issuer **3211**, and a per-run `.data/auth-e2e-*` store. Stop other Next.js development servers for this checkout to avoid its development lock. Test setup deletes only this dedicated workspace. Browser flows cover first-run path selection, a lesson reflection/completion, equipment add/edit, practice logging and persistence, offline coaching, progress, real photo normalization/comparison/export/deletion, design template/undo/redo/mirror/save/reopen/SVG export, all nine routes at a 390-pixel viewport, mobile navigation, a 320-pixel overflow check, and request/deletion/worksheet protections.
+The first Playwright suite starts its own server on port **3100** and refuses to reuse an existing server. `npm run test:e2e` then runs the authentication config sequentially: app port **3101** and generated-key mock issuer **3211**. `scripts/test-database.ts` provisions/migrates/seeds a separate PostgreSQL schema and temporary photo directory per app run, then launches `scripts/server.mjs --dev`; teardown removes only those owned fixtures. Stop other Next.js development servers for this checkout to avoid its development lock. Browser flows cover first-run path selection, a lesson reflection/completion, equipment add/edit, practice logging and persistence, offline coaching, progress, photo normalization/comparison/export/deletion, design template/undo/redo/mirror/save/reopen/SVG export, all nine routes at a 390-pixel viewport, mobile navigation, a 320-pixel overflow check, and request/deletion/worksheet protections.
 
 The browser configuration uses `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` when supplied, then `/usr/bin/chromium` when present, otherwise Playwright's bundled Chromium. On a fresh machine:
 
@@ -29,7 +30,35 @@ npx playwright install chromium
 
 Linux CI can use `npx playwright install --with-deps chromium`. CI runs migrations, seed, lint, tests, build, and browser tests, uploading retained traces/reports after failures. Screenshots and HTML reports are local test artifacts, not deployment previews.
 
-## Previous MVP execution evidence
+## Current PostgreSQL execution evidence
+
+Verified in the isolated Linux cloud workspace with Node.js 24.22.1 and PostgreSQL **17.11**, supplied by an owned disposable Docker instance. No live AIBRY application/identity database or shared infrastructure was used.
+
+| Check | Executed result |
+| --- | --- |
+| `npm ci` with the updated lockfile | Passed; 414 installed packages |
+| `npm run lint` | Passed: ESLint and strict TypeScript |
+| `npm test` with explicit disposable `TEST_DATABASE_URL` | **176 passed across 13 files**, 38.69 seconds |
+| `npm run test:unit` without PostgreSQL | **47 passed across four files** |
+| `npm run build` | Passed; optimized Next.js production build |
+| `npm run test:e2e` against PostgreSQL and the generated-key mock issuer | **7 passed**: original studio suite 5/5 (32.6 s), auth suite 2/2 (20.2 s) |
+| Migration/seed CLI checks on a fresh random schema | Migration created schema with zero lessons; two seeds yielded 36 lessons; deleting a sample and reseeding did not restore it; reset refused |
+| Offline SQLite importer suite | **12 passed** within the full suite, including WAL/source-change rollback and verified backups/photos |
+| Actual `db:import-sqlite` CLI smoke | Passed against a disposable empty schema: redacted report, preserved text ID and contents, unchanged source, no claim, repeated post-import seeding, occupied-target rejection |
+| Runtime/PM2 configuration | Node syntax and 17 configuration assertions passed; one fork instance and shutdown messages verified without starting PM2 |
+| Production-mode HTTP smoke with a restricted test role | Passed on port 3031: PostgreSQL/schema readiness, denied demo fallback, Host/Origin checks, CRUD, same-session persistence over restart, logout revocation, graceful pool closure, no secrets in captured logs |
+| nginx example syntax | `nginx -t` passed inside a disposable network-disabled container using test certificates and local placeholder substitutions; no ingress activated |
+| `npm audit --omit=dev` | Zero known production dependency vulnerabilities |
+
+The production-mode probe ran the built Node application on Linux with a separately created least-privilege **test** role and an explicitly seeded test session. It did not perform a real provider login, run Windows/PM2, verify remote PostgreSQL TLS/firewalls, or deploy anything. The first manual proxy-style probe used a client that did not preserve its Host override; switching that probe to Node HTTP's explicit Host handling verified the application's existing strict authority checks without weakening them.
+
+Concurrency coverage includes simultaneous migrations, seeds, first issuer/subject logins, session creation, callback single-use consumption, competing demo claims, and the source-update/import lock-order regression. Photo tests cover parallel cap enforcement, ownership, failed inserts, commit-acknowledgement ambiguity, durable deletion/rollback, retry, and symlink/path defenses. A changed generic 404 message introduced by the new owner lock was caught and restored; the full final test run passes unchanged authorization assertions.
+
+Browser fixtures removed their owned schemas, photo directories, and metadata manifests. The temporary restricted-role production fixture also removed its schema, role, and files. Original SQLite migration files and the existing local SQLite data were not reset or imported into a real database.
+
+## Historical SQLite implementation evidence
+
+The results below describe earlier commits before the PostgreSQL conversion. They are retained as history, not PostgreSQL verification. Current PostgreSQL results are recorded above. Old SQLite initialization, reset/path settings and port 3000 instructions in historical probes do not define the current runtime; use [WINDOWS-FEDORA-DEPLOYMENT.md](WINDOWS-FEDORA-DEPLOYMENT.md) and the current scripts.
 
 The original MVP at `3da5def` was executed in the Linux cloud workspace with Node.js **24.22.1**, Next.js **16.4.5**, React **19.3.1**, TypeScript **6.0.3**, Vitest **5.1.0**, and Playwright **1.65.0**:
 
@@ -50,7 +79,7 @@ Screenshots from the executed browser flow are saved at [desktop dashboard](scre
 
 ## Remaining verification boundaries
 
-No paid OpenAI acceptance request, interactive login against a real registered AIBRY ID client, Windows execution, production deployment, external expert curriculum review, or independent full accessibility audit has been performed. The local production-mode probe verified denial of access, not a deployable authenticated workflow. Linux/Windows startup instructions use the same Node scripts, but portability instructions are not a claim of Windows runtime testing.
+No paid OpenAI acceptance request, interactive login against a real registered AIBRY ID client, Windows execution, production deployment, external expert curriculum review, or independent full accessibility audit has been performed. The historical unconfigured probe verified denial of access; the current PostgreSQL production-mode smoke uses an isolated pre-seeded session, not real identity-provider acceptance. Linux/Windows startup instructions use the same Node scripts, but portability instructions are not a claim of Windows runtime testing.
 
 These checks establish local development behavior; they do not establish deployment or environment publication.
 

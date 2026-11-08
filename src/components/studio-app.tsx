@@ -1908,11 +1908,13 @@ function WorkspaceSettings({
     setError("");
     setStatus("");
     try {
-      await mutate("/api/data", { confirm: confirmation }, "DELETE");
+      const deletion = await mutate("/api/data", { confirm: confirmation }, "DELETE");
       setConfirmation("");
       await refresh();
       setStatus(
-        "Your user records and photos have been deleted. Original curriculum is retained; sample equipment will not be re-created.",
+        deletion.fileCleanup === "pending"
+          ? "Your records were deleted. Photo-file cleanup is queued and will retry; the original curriculum is retained."
+          : "Your user records and photos have been deleted. Original curriculum is retained; sample equipment will not be re-created.",
       );
     } catch (e) {
       setError((e as Error).message);

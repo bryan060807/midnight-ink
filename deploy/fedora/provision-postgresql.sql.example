@@ -1,0 +1,25 @@
+-- Separately operator-executed using verified PostgreSQL administration access.
+-- Proposed dedicated identifiers only. Inspect existing roles/databases first;
+-- CREATE deliberately fails on duplicates rather than altering an existing owner.
+-- Do not run this against another application's database.
+\set ON_ERROR_STOP on
+SELECT current_user, current_database(), version();
+CREATE ROLE midnight_ink_migrator LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+CREATE ROLE midnight_ink_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+-- Set fresh passwords interactively; psql does not echo them into command history.
+\password midnight_ink_migrator
+\password midnight_ink_app
+CREATE DATABASE midnight_ink OWNER midnight_ink_migrator;
+REVOKE ALL ON DATABASE midnight_ink FROM PUBLIC;
+GRANT CONNECT ON DATABASE midnight_ink TO midnight_ink_app;
+\connect midnight_ink
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA public TO midnight_ink_migrator;
+GRANT USAGE ON SCHEMA public TO midnight_ink_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE midnight_ink_migrator IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO midnight_ink_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE midnight_ink_migrator IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO midnight_ink_app;
+-- Run migrations/seed separately as midnight_ink_migrator, then run the separate
+-- runtime-grants.sql.example against midnight_ink and verify effective permissions.
+-- Do not grant CREATE, database ownership, role membership or SUPERUSER to the runtime role.
