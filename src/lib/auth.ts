@@ -1,33 +1,114 @@
-export class ApiError extends Error {
-  constructor(public status:number, message:string) { super(message); }
-}
+import { ApiError } from "./errors";
+import {
+  getAuthConfig,
+  getRequiredAuthConfig,
+  sessionCookieName,
+  readCookie,
+  hashAuthToken,
+  assertTrustedHost,
+  assertSameOrigin,
+  isLoopback,
+  type AuthConfig,
+} from "./auth-config";
+import { findSession, getIdentity } from "./auth-store";
+export { ApiError } from "./errors";
 
-/** Local development identity. There is deliberately no production bypass. */
-export function requireWorkspace(request?:Request):string {
-  if (process.env.NODE_ENV === 'production') throw new ApiError(503,'Production authentication is not configured. Local demo workspaces are disabled in production.');
-  if (process.env.LOCAL_DEMO_ENABLED === 'false') throw new ApiError(403,'Local demo workspace is disabled.');
-  if (request) {
-    const url = new URL(request.url);
-    const hostHeader = request.headers.get('host');
-    let host = url.hostname;
-    let authority = url.host;
-    try {
-      if (hostHeader) {
-        const parsedHost=new URL(`${url.protocol}//${hostHeader}`);
-        if(parsedHost.username||parsedHost.password||parsedHost.pathname!=='/'||parsedHost.search||parsedHost.hash)throw new Error('Invalid authority.');
-        host=parsedHost.hostname;
-        authority=parsedHost.host;
-      }
-    } catch { throw new ApiError(403,'Invalid host.'); }
-    // This identity has no password; it is a loopback-only development workspace.
-    if (!['localhost','127.0.0.1','[::1]','::1'].includes(host)) throw new ApiError(403,'The local demo workspace is available on localhost only.');
-    if (!['GET','HEAD','OPTIONS'].includes(request.method)) {
-      const origin = request.headers.get('origin');
-      // Next.js can expose its internal bind address in request.url. The validated
-      // Host header represents the browser's origin; forwarded headers are ignored.
-      if (origin && origin !== `${url.protocol}//${authority}`) throw new ApiError(403,'Cross-origin changes are not allowed.');
-      if (request.headers.get('sec-fetch-site') === 'cross-site') throw new ApiError(403,'Cross-site changes are not allowed.');
-    }
+export type RequestIdentity = {
+  mode: "demo" | "authenticated";
+  profileId: string;
+  expiresAt: number | null;
+  identity: ReturnType<typeof getIdentity>;
+};
+function mutable(request: Request) {
+  return !["GET", "HEAD", "OPTIONS"].includes(request.method);
+}
+function demoRequestGuard(request: Request) {
+  const url = new URL(request.url);
+  const supplied = request.headers.get("host") || url.host;
+  let host: URL;
+  try {
+    host = new URL(`${url.protocol}//${supplied}`);
+    if (
+      host.username ||
+      host.password ||
+      host.pathname !== "/" ||
+      host.search ||
+      host.hash
+    )
+      throw new Error();
+  } catch {
+    throw new ApiError(403, "Invalid host.");
   }
-  return 'local-demo';
+  if (!isLoopback(host.hostname))
+    throw new ApiError(
+      403,
+      "The local demo workspace is available on localhost only.",
+    );
+  if (mutable(request)) {
+    if (request.headers.get("sec-fetch-site") === "cross-site")
+      throw new ApiError(403, "Cross-site changes are not allowed.");
+    const origin = request.headers.get("origin");
+    if (origin && origin !== `${url.protocol}//${host.host}`)
+      throw new ApiError(403, "Cross-origin changes are not allowed.");
+  }
+}
+export function getRequestIdentity(request?: Request): RequestIdentity {
+  const config = getAuthConfig();
+  if (process.env.NODE_ENV === "production" && !config) getRequiredAuthConfig();
+  const cookies = request?.headers.get("cookie") || "";
+  // A failed/expired authenticated cookie never quietly becomes the demo owner.
+  const hasSessionCookie = /(?:^|;\s*)(?:__Host-mi_session|mi_session)=/.test(
+    cookies,
+  );
+  if (hasSessionCookie) {
+    if (!request || !config)
+      throw new ApiError(401, "Your session has expired. Sign in again.");
+    assertTrustedHost(request, config);
+    const token = readCookie(request, sessionCookieName(config));
+    const session = token ? findSession(hashAuthToken(token, config)) : null;
+    if (!session)
+      throw new ApiError(401, "Your session has expired. Sign in again.");
+    if (mutable(request)) assertSameOrigin(request, config);
+    const identity = getIdentity(session.profileId);
+    if (!identity || identity.issuer !== config.issuer)
+      throw new ApiError(
+        401,
+        "Your session is no longer available. Sign in again.",
+      );
+    return {
+      mode: "authenticated",
+      profileId: session.profileId,
+      expiresAt: session.expiresAt,
+      identity,
+    };
+  }
+  if (
+    process.env.NODE_ENV !== "production" &&
+    process.env.LOCAL_DEMO_ENABLED !== "false"
+  ) {
+    if (request) demoRequestGuard(request);
+    return {
+      mode: "demo",
+      profileId: "local-demo",
+      expiresAt: null,
+      identity: null,
+    };
+  }
+  if (config && request) assertTrustedHost(request, config);
+  if (!config && process.env.NODE_ENV !== "production" && !request)
+    throw new ApiError(
+      401,
+      "Local demo workspace is disabled. Sign in to continue.",
+    );
+  throw new ApiError(401, "Sign in with AIBRY ID to open your workspace.");
+}
+export function requireWorkspace(request?: Request): string {
+  return getRequestIdentity(request).profileId;
+}
+export function getSessionTokenHash(
+  request: Request,
+  config: AuthConfig,
+): string | null {
+  const token = readCookie(request, sessionCookieName(config));
+  return token ? hashAuthToken(token, config) : null;
 }

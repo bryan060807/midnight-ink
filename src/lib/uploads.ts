@@ -2,7 +2,7 @@ import sharp from 'sharp';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
-import { ApiError } from './auth';
+import { ApiError } from './errors';
 import { getDatabase, getRecord, photosDirectory } from './db';
 
 export const MAX_IMAGE_BYTES=5*1024*1024;
@@ -52,7 +52,7 @@ export async function savePhoto(profileId:string,sessionId:string,file:File) {
 }
 
 export function readPhoto(profileId:string,id:string) {
-  const row=getDatabase().prepare('SELECT filename,mimeType FROM PracticePhoto WHERE profileId=? AND id=?').get(profileId,id);
+  const row=getDatabase().prepare('SELECT p.filename,p.mimeType FROM PracticePhoto p JOIN PracticeSession s ON s.id=p.sessionId AND s.profileId=p.profileId WHERE p.profileId=? AND p.id=?').get(profileId,id);
   if(!row)throw new ApiError(404,'Photo not found.');
   try{return {buffer:readFileSync(safePhotoPath(String(row.filename))),mimeType:String(row.mimeType)};}
   catch(error){if(error instanceof ApiError)throw error;throw new ApiError(404,'Photo file not found.');}
@@ -60,9 +60,11 @@ export function readPhoto(profileId:string,id:string) {
 
 export function removePhotos(profileId:string,sessionId?:string,id?:string) {
   const db=getDatabase();
+  if(sessionId)getRecord('PracticeSession',profileId,sessionId,db);
   const where=`profileId=?${sessionId?' AND sessionId=?':''}${id?' AND id=?':''}`;
   const args=[profileId,...(sessionId?[sessionId]:[]),...(id?[id]:[])];
-  const rows=db.prepare(`SELECT id,filename FROM PracticePhoto WHERE ${where}`).all(...args);
+  const rows=db.prepare(`SELECT id,sessionId,filename FROM PracticePhoto WHERE ${where}`).all(...args);
+  for(const row of rows)getRecord('PracticeSession',profileId,String(row.sessionId),db);
   if(id&&!rows.length)throw new ApiError(404,'Photo not found.');
   for(const row of rows){
     try{unlinkSync(safePhotoPath(String(row.filename)));}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
