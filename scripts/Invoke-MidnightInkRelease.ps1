@@ -66,7 +66,8 @@ $credential = Import-Clixml -LiteralPath (Join-Path $root 'runtime-environment.c
 try { $environment = $credential.GetNetworkCredential().Password | ConvertFrom-Json -AsHashtable }
 catch { throw 'Protected runtime environment cannot be opened by this account.' }
 foreach ($key in $environment.Keys) {
-  if (!$target.pm2_env.env.Contains($key) -or [string]$target.pm2_env.env[$key] -cne [string]$environment[$key]) { throw 'Production environment drift detected; restage before switching.' }
+  $current = if ($target.pm2_env.Contains($key)) { $target.pm2_env[$key] } elseif ($target.pm2_env.env.Contains($key)) { $target.pm2_env.env[$key] } else { $null }
+  if ($null -eq $current -or [string]$current -cne [string]$environment[$key]) { throw 'Production environment drift detected; restage before switching.' }
 }
 if ($Action -eq 'Validate') {
   Write-Output 'Validated: app 30, existing daemon, release/rollback hashes and protected environment. No restart performed.'
