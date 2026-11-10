@@ -27,7 +27,8 @@ function Invoke-Pm2([string[]]$CliArguments) {
   $start.RedirectStandardOutput = $true
   $start.RedirectStandardError = $true
   $start.Environment['PM2_HOME'] = $manifest.pm2Home
-  $start.ArgumentList.Add($manifest.pm2Cli)
+  $start.ArgumentList.Add((Join-Path $manifest.originalCwd 'scripts/release-pm2-rpc.cjs'))
+  $start.ArgumentList.Add($root)
   foreach ($argument in $CliArguments) { $start.ArgumentList.Add($argument) }
   $process = [Diagnostics.Process]::Start($start)
   $output = $process.StandardOutput.ReadToEndAsync()
@@ -40,13 +41,22 @@ function Invoke-Pm2([string[]]$CliArguments) {
 }
 
 function Get-Target {
-  try { $apps = (Invoke-Pm2 @('jlist')) | ConvertFrom-Json -AsHashtable }
+  try { $apps = (Invoke-Pm2 @('inspect')) | ConvertFrom-Json -AsHashtable }
   catch { throw 'Cannot read existing PM2 state; no mutation is authorized by this failure.' }
   $targets = @($apps | Where-Object { $_['name'] -eq 'midnight-ink' })
   if ($targets.Count -ne 1 -or $targets[0]['pm_id'] -ne 30) { throw 'Expected unique PM2 app 30 was not found.' }
   return $targets[0]
 }
 
+$credential = Import-Clixml -LiteralPath (Join-Path $root 'runtime-environment.clixml')
+try { $environment = $credential.GetNetworkCredential().Password | ConvertFrom-Json -AsHashtable }
+catch { throw 'Protected runtime environment cannot be opened by this account.' }
+$saved = @{}
+try {
+  foreach ($key in $environment.Keys) {
+    $saved[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
+    [Environment]::SetEnvironmentVariable($key, [string]$environment[$key], 'Process')
+  }
 $target = Get-Target
 $cwd = $target.pm2_env.pm_cwd
 $allowed = @($manifest.originalCwd, $manifest.releasePath, $manifest.rollbackPath)
@@ -62,13 +72,7 @@ foreach ($entry in $manifest.originalConfiguration) {
 foreach ($binary in @(@{path=$manifest.nodeExe;hash=$manifest.nodeHash},@{path=$manifest.pm2Cli;hash=$manifest.pm2CliHash})) {
   if ((Get-FileHash -LiteralPath $binary.path -Algorithm SHA256).Hash -ne $binary.hash) { throw 'Verified runtime executable changed.' }
 }
-$credential = Import-Clixml -LiteralPath (Join-Path $root 'runtime-environment.clixml')
-try { $environment = $credential.GetNetworkCredential().Password | ConvertFrom-Json -AsHashtable }
-catch { throw 'Protected runtime environment cannot be opened by this account.' }
-foreach ($key in $environment.Keys) {
-  $current = if ($target.pm2_env.Contains($key)) { $target.pm2_env[$key] } elseif ($target.pm2_env.env.Contains($key)) { $target.pm2_env.env[$key] } else { $null }
-  if ($null -eq $current -or [string]$current -cne [string]$environment[$key]) { throw 'Production environment drift detected; restage before switching.' }
-}
+if (!$target.environmentMatches) { throw 'Production environment drift detected; restage before switching.' }
 if ($Action -eq 'Validate') {
   Write-Output 'Validated: app 30, existing daemon, release/rollback hashes and protected environment. No restart performed.'
   exit 0
@@ -76,21 +80,13 @@ if ($Action -eq 'Validate') {
 if ($Action -eq 'Deploy' -and $cwd -ne $manifest.originalCwd) { throw 'Deploy expects the original production cwd; inspect before retrying.' }
 if ($Action -eq 'Rollback' -and $cwd -ne $manifest.releasePath) { throw 'Rollback expects the staged release cwd; inspect before retrying.' }
 $destination = if ($Action -eq 'Deploy') { $manifest.releasePath } else { $manifest.rollbackPath }
-$config = Join-Path $root $(if ($Action -eq 'Deploy') { 'deploy.config.cjs' } else { 'rollback.config.cjs' })
-$saved = @{}
-try {
-  foreach ($key in $environment.Keys) {
-    $saved[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
-    [Environment]::SetEnvironmentVariable($key, [string]$environment[$key], 'Process')
-  }
-  # Config restart addresses only the existing name; it cannot create another app.
-  # Explicit current_conf pm_cwd/pm_exec_path are used by the installed PM2 version.
-  $null = Invoke-Pm2 @('restart', $config, '--only', 'midnight-ink')
+$null = Invoke-Pm2 @($Action.ToLowerInvariant(), '--approved')
+$after = Get-Target
+if ($after.pm2_env.pm_cwd -ne $destination -or $after.pm2_env.status -ne 'online') { throw 'Release switch did not reach the expected online cwd; follow rollback procedure.' }
+Write-Output "Scoped $Action completed for app 30. Authenticated acceptance checks are still required."
+
 } finally {
   foreach ($key in $saved.Keys) { [Environment]::SetEnvironmentVariable($key, $saved[$key], 'Process') }
   $environment = $null
   $credential = $null
 }
-$after = Get-Target
-if ($after.pm2_env.pm_cwd -ne $destination -or $after.pm2_env.status -ne 'online') { throw 'Release switch did not reach the expected online cwd; follow rollback procedure.' }
-Write-Output "Scoped $Action completed for app 30. Authenticated acceptance checks are still required."

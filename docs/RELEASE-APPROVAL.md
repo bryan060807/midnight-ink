@@ -46,14 +46,17 @@ Set-Location -LiteralPath 'C:\Users\bryan\aibry\projects\midnight-ink'
 .\scripts\Invoke-MidnightInkRelease.ps1 -PackageRoot 'C:\Users\bryan\aibry\releases\midnight-ink\20261109-combined' -Action Deploy -ApproveProductionSwitch
 ```
 
-The helper invokes exactly:
-`C:\Program Files\nodejs\node.exe`
-`C:\Users\bryan\AppData\Roaming\npm\node_modules\pm2\bin\pm2`
-`restart <package>\deploy.config.cjs --only midnight-ink`, from the original cwd.
-It supplies only the captured application environment in child-process memory;
-raw PM2 output is withheld. The config pins `pm_cwd`, `pm_exec_path` and interpreter
-to the staged release and verified Node executable, retaining original PM2
-readiness, shutdown, log and restart settings. Existing process ID 30 is retained.
+The helper invokes the verified `C:\Program Files\nodejs\node.exe` with
+`scripts\release-pm2-rpc.cjs <package> deploy --approved`, from the original cwd.
+The client loads the pinned installed PM2 module at
+`C:\Users\bryan\AppData\Roaming\npm\node_modules\pm2`, opens only its existing
+RPC socket, verifies the unique app 30 again, then sends exactly one
+`restartProcessId` packet with id 30. It bypasses PM2's constructor/start fallback;
+socket failures cannot launch another daemon. The installed PM2 CLI config parser
+strips internal cwd/script fields, so a generic config restart is unsuitable here.
+The explicit packet carries `current_conf.pm_cwd`, `pm_exec_path` and interpreter,
+retaining original readiness, shutdown, logs and restart settings. Protected
+environment values remain in child-process memory; no raw PM2 responses are output.
 
 The original checkout/build is left untouched. No database restore, migration,
 seed, reset, identity-provider change or photo-data copy is involved. Existing
@@ -96,7 +99,7 @@ Stop after one failed switch/rollback and diagnose; do not retry restarts blindl
 .\scripts\Invoke-MidnightInkRelease.ps1 -PackageRoot 'C:\Users\bryan\aibry\releases\midnight-ink\20261109-combined' -Action Rollback -ApproveProductionSwitch
 ```
 
-This invokes the same executable and scoped `restart` with `rollback.config.cjs`,
+This invokes the same executable and scoped restart packet with `rollback.config.cjs`,
 switching app 30 to `<package>\rollback`, preserving its environment and original
 compiled build. Repeat readiness, listener, authenticated workspace and Rook
 checks. Environment drift blocks the helper and requires inspection/re-staging;
