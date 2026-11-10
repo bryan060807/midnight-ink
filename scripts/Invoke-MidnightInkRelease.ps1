@@ -10,6 +10,7 @@ Set-StrictMode -Version Latest
 # Environment values stay in DPAPI storage or child-process memory, never output.
 $root = (Resolve-Path -LiteralPath $PackageRoot).Path
 $manifest = Get-Content -Raw -LiteralPath (Join-Path $root 'release-manifest.json') | ConvertFrom-Json -AsHashtable
+$controlCwd = if ($manifest.Contains('controlCwd')) { $manifest.controlCwd } else { $manifest.originalCwd }
 if ($manifest.appName -ne 'midnight-ink' -or $manifest.appId -ne 30) { throw 'Unexpected release target.' }
 if ($Action -ne 'Validate' -and !$ApproveProductionSwitch) { throw 'Explicit production switch approval is required.' }
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -21,13 +22,13 @@ if ($daemon.ProcessName -ne 'node') { throw 'Existing PM2 daemon is not verified
 
 function Invoke-Pm2([string[]]$CliArguments) {
   $start = [Diagnostics.ProcessStartInfo]::new($manifest.nodeExe)
-  $start.WorkingDirectory = $manifest.originalCwd
+  $start.WorkingDirectory = $controlCwd
   $start.UseShellExecute = $false
   $start.CreateNoWindow = $true
   $start.RedirectStandardOutput = $true
   $start.RedirectStandardError = $true
   $start.Environment['PM2_HOME'] = $manifest.pm2Home
-  $start.ArgumentList.Add((Join-Path $manifest.originalCwd 'scripts/release-pm2-rpc.cjs'))
+  $start.ArgumentList.Add((Join-Path $controlCwd 'scripts/release-pm2-rpc.cjs'))
   $start.ArgumentList.Add($root)
   foreach ($argument in $CliArguments) { $start.ArgumentList.Add($argument) }
   $process = [Diagnostics.Process]::Start($start)

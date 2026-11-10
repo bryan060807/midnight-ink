@@ -97,7 +97,7 @@ describe("provider diagnostics and strict transport contract", () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  const cases: Array<[string, () => Response | Error]> = [
+  const cases: Array<[string, () => Response | Error, string?]> = [
     ["http_failure", () => new Response("PRIVATE_BODY", { status: 429 })],
     ["timeout", () => new DOMException("PRIVATE_ERROR", "TimeoutError")],
     ["timeout", () => new DOMException("PRIVATE_ERROR", "AbortError")],
@@ -114,12 +114,12 @@ describe("provider diagnostics and strict transport contract", () => {
     ["schema_violation", () => Response.json(envelope({ ...valid, source: "offline" }))],
     ["schema_violation", () => Response.json(envelope(null))],
     ["invalid_references", () => Response.json(envelope({ ...valid, referenceIds: ["invented"] }))],
-    ["safety_rejection", () => Response.json(envelope({ ...valid, answer: "Use 8 volts on your client's skin." }))],
-    ["safety_rejection", () => Response.json(envelope({ ...valid, steps: ["Reuse the cartridge"] }))],
-    ["safety_rejection", () => Response.json(envelope({ ...valid, answer: "You are ready to tattoo people after this exercise." }))],
-    ["safety_rejection", () => Response.json(envelope({ ...valid, answer: "The photo confirms it is sterile." }))],
-    ["safety_rejection", () => Response.json(envelope({ ...valid, steps: ["Draw a 30 mm line on paper."] }))],
-    ["safety_rejection", () => Response.json({ choices: [{ finish_reason: "content_filter", message: { content: null } }] })],
+    ["safety_rejection", () => Response.json(envelope({ ...valid, answer: "Use 8 volts on your client's skin." })), "numerical_setting"],
+    ["safety_rejection", () => Response.json(envelope({ ...valid, steps: ["Reuse the cartridge"] })), "cartridge_reuse"],
+    ["safety_rejection", () => Response.json(envelope({ ...valid, answer: "You are ready to tattoo people after this exercise." })), "readiness_claim"],
+    ["safety_rejection", () => Response.json(envelope({ ...valid, answer: "The photo confirms it is sterile." })), "photo_safety_claim"],
+    ["safety_rejection", () => Response.json(envelope({ ...valid, steps: ["Set the needle depth to 1 mm."] })), "numerical_setting"],
+    ["safety_rejection", () => Response.json({ choices: [{ finish_reason: "content_filter", message: { content: null } }] }), "provider_content_filter"],
     ["provider_refusal", () => Response.json({ choices: [{ finish_reason: "stop", message: { content: null, refusal: "PRIVATE_REFUSAL" } }] })],
     ["incomplete_response", () => Response.json(envelope(valid, "length"))],
     ["incomplete_response", () => Response.json(envelope(valid, "tool_calls"))],
@@ -127,15 +127,52 @@ describe("provider diagnostics and strict transport contract", () => {
     ["empty_response", () => new Response(null)],
     ["response_too_large", () => new Response("x".repeat(24001))],
   ];
-  it.each(cases)("falls back with private-data-free %s diagnostics (%#)", async (category, make) => {
+  it.each(cases)("falls back with private-data-free %s diagnostics (%#)", async (category, make, reason) => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const fixture = make();
     const fetcher = fixture instanceof Error ? vi.fn().mockRejectedValue(fixture) : vi.fn().mockResolvedValue(fixture);
     const result = await run(fetcher);
     expect(result.source).toBe("offline");
     expect(coachResponseSchema.safeParse(result).success).toBe(true);
-    expect(warn.mock.calls).toEqual([["rook_provider_fallback", { provider: "openai", category, ...(category === "http_failure" ? { status: 429 } : {}) }]]);
+    expect(warn.mock.calls).toEqual([["rook_provider_fallback", { provider: "openai", category, ...(category === "http_failure" ? { status: 429 } : {}), ...(reason ? { reason } : {}) }]]);
     expect(JSON.stringify(warn.mock.calls)).not.toMatch(/PRIVATE|pencil|question/i);
+  });
+  it.each([
+    'Never reuse the cartridge.',
+    'Do not reuse the cartridge.',
+    "Don't reuse needles.",
+    'You must not re-use a cartridge.',
+    "Never claim you're ready to tattoo people.",
+    'Do not assume the photo proves it is sterile.',
+  ])('accepts a clear safety prohibition for the ink-loading question: %s', async warning => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await coach(request('how do i get the ink in to the needle'), {}, {
+      provider: 'openai', apiKey: 'test-placeholder',
+      fetch: vi.fn().mockResolvedValue(Response.json(envelope({
+        answer: 'For synthetic practice only, follow the exact cartridge manufacturer instructions for ink loading; I cannot verify your equipment here.',
+        steps: [warning, 'Keep this exercise on synthetic practice material.'], referenceIds: [],
+      }))),
+    });
+    expect(result.source).toBe('openai');
+    expect(warn).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['Draw a 30 mm line on paper.', true],
+    ['On paper, mark dots 30–50 mm apart.', true],
+    ['Draw a 30 mm line.', false],
+    ['Draw a 30 mm line on synthetic skin.', false],
+    ['On paper, set the machine to 8 volts.', false],
+    ['On paper, set needle protrusion to 1 mm.', false],
+    ['For practice, dip the needle 2 mm into ink.', false],
+    ['On paper, draw a 30 mm line. Apply the same depth to a client.', false],
+    ['Never reuse the cartridge unless it has been cleaned.', false],
+    ['Do not reuse the cartridge, but reuse a needle after cleaning.', false],
+    ['Reuse a cartridge after the session.', false],
+    ['Reuse an unused needle after practice.', false],
+  ])('keeps the narrow numerical/reuse boundary: %s', async (step, accepted) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await run(vi.fn().mockResolvedValue(Response.json(envelope({ ...valid, steps: [step] }))));
+    expect(result.source).toBe(accepted ? 'openai' : 'offline');
   });
   it("reports a missing key without making a request", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
