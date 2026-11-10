@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { coach, coachRequestSchema, coachResponseSchema, offlineCoach, retrieveTechniques } from "../src/lib/coach";
+import { COACH_TIMEOUT_MS, coach, coachRequestSchema, coachResponseSchema, offlineCoach, retrieveTechniques } from "../src/lib/coach";
 import { techniqueCards } from "../src/lib/curriculum";
 
 const request = (question: string) => coachRequestSchema.parse({ question });
@@ -50,14 +50,14 @@ describe("Rook's bounded, grounded coaching", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
   it("falls back for provider errors and invalid answers", async () => {
-    for (const response of [new Response("rate limited", { status: 429 }), Response.json({ choices: [{ message: { content: "not json" } }] }), Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "Use 8 volts on your client's skin.", steps: ["Tattoo your client."], referenceIds: [] }) } }] })]) {
+    for (const response of [new Response("rate limited", { status: 429 }), Response.json({ choices: [{ finish_reason: "stop", message: { content: "not json" } }] }), Response.json({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ answer: "Use 8 volts on your client's skin.", steps: ["Tattoo your client."], referenceIds: [] }) } }] })]) {
       const result = await coach(request("How do I improve?"), {}, { provider: "openai", apiKey: "test-placeholder", fetch: vi.fn().mockResolvedValue(response) });
       expect(result.source).toBe("offline");
       expect(result.notice).toContain("invalid answer");
     }
   });
   it("accepts a valid mocked live response and sends no photos, private notes or conversation history", async () => {
-    const fetcher = vi.fn().mockResolvedValue(Response.json({ choices: [{ message: { content: JSON.stringify({ answer: "Rehearse a comfortable movement on paper before making one deliberate mark.", steps: ["Repeat five pencil lines and compare the starts."], referenceIds: [] }) } }] }));
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify({ answer: "Rehearse a comfortable movement on paper before making one deliberate mark.", steps: ["Repeat five pencil lines and compare the starts."], referenceIds: [] }) } }] }));
     const result = await coach(coachRequestSchema.parse({ question: "How do I draw lines?", history: [{ role: "user", content: "private past message" }] }), { sessions: [{ notes: "private journal" }], equipment: [{ name: "Practice pen", notes: "private equipment note" }] }, { provider: "openai", apiKey: "test-placeholder", fetch: fetcher });
     expect(result.source).toBe("openai");
     const body = fetcher.mock.calls[0][1].body as string;
@@ -68,9 +68,91 @@ describe("Rook's bounded, grounded coaching", () => {
   });
   it("rejects invented citations and oversized provider responses", async () => {
     const valid = { answer: "Practice five deliberate pencil strokes and compare their starts.", steps: ["Choose one visible goal for the next attempt."], referenceIds: ["invented-source"] };
-    const result = await coach(request("Help with lines"), {}, { provider: "openai", apiKey: "test-placeholder", fetch: vi.fn().mockResolvedValue(Response.json({ choices: [{ message: { content: JSON.stringify(valid) } }] })) });
+    const result = await coach(request("Help with lines"), {}, { provider: "openai", apiKey: "test-placeholder", fetch: vi.fn().mockResolvedValue(Response.json({ choices: [{ finish_reason: "stop", message: { content: JSON.stringify(valid) } }] })) });
     expect(result.source).toBe("offline");
     const huge = await coach(request("Help with lines"), {}, { provider: "openai", apiKey: "test-placeholder", fetch: vi.fn().mockResolvedValue(new Response("x".repeat(25_000))) });
     expect(huge.source).toBe("offline");
+  });
+});
+
+
+describe("provider diagnostics and strict transport contract", () => {
+  const valid = { answer: "Rehearse a comfortable pencil movement on paper before one deliberate mark.", steps: ["Compare five pencil strokes."], referenceIds: [] as string[] };
+  const envelope = (data: unknown = valid, finish_reason = "stop") => ({ choices: [{ finish_reason, message: { content: JSON.stringify(data), refusal: null } }] });
+  const run = (fetcher: typeof fetch) => coach(request("Private question about pencil practice"), { profile: { name: "PRIVATE_NAME" }, sessions: [{ notes: "PRIVATE_NOTES" }] }, { provider: "openai", apiKey: "PRIVATE_KEY", fetch: fetcher });
+
+  it("uses strict schema, preserves app-owned metadata and accepts real API envelope fields", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const id = retrieveTechniques("Private question about pencil practice")[0].id;
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ id: "fixture", object: "chat.completion", choices: [{ index: 0, ...envelope({ ...valid, referenceIds: [id] }).choices[0], logprobs: null }], usage: { total_tokens: 100 } }));
+    const result = await run(fetcher);
+    expect(result.source).toBe("openai");
+    expect(result.referenceIds).toEqual([id]);
+    expect(result.coachName).toBe("Rook");
+    const body = JSON.parse(fetcher.mock.calls[0][1].body);
+    expect(body.response_format.type).toBe("json_schema");
+    expect(body.response_format.json_schema.strict).toBe(true);
+    expect(body.response_format.json_schema.schema.required).toEqual(["answer", "steps", "referenceIds"]);
+    expect(body.response_format.json_schema.schema.additionalProperties).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  const cases: Array<[string, () => Response | Error]> = [
+    ["http_failure", () => new Response("PRIVATE_BODY", { status: 429 })],
+    ["timeout", () => new DOMException("PRIVATE_ERROR", "TimeoutError")],
+    ["timeout", () => new DOMException("PRIVATE_ERROR", "AbortError")],
+    ["network_failure", () => new Error("PRIVATE_ERROR")],
+    ["invalid_json", () => new Response("PRIVATE_BODY")],
+    ["invalid_json", () => Response.json({ choices: [{ finish_reason: "stop", message: { content: "PRIVATE_BODY" } }] })],
+    ["schema_violation", () => Response.json({ choices: [] })],
+    ["schema_violation", () => Response.json(envelope({ ...valid, answer: "short" }))],
+    ["schema_violation", () => Response.json(envelope({ ...valid, steps: [] }))],
+    ["schema_violation", () => Response.json(envelope({ ...valid, steps: Array(6).fill("Step") }))],
+    ["schema_violation", () => Response.json(envelope({ ...valid, answer: "x".repeat(3001) }))],
+    ["schema_violation", () => Response.json(envelope({ ...valid, steps: ["x".repeat(501)] }))],
+    ["schema_violation", () => Response.json(envelope({ ...valid, referenceIds: Array(6).fill("id") }))],
+    ["schema_violation", () => Response.json(envelope({ ...valid, source: "offline" }))],
+    ["schema_violation", () => Response.json(envelope(null))],
+    ["invalid_references", () => Response.json(envelope({ ...valid, referenceIds: ["invented"] }))],
+    ["safety_rejection", () => Response.json(envelope({ ...valid, answer: "Use 8 volts on your client's skin." }))],
+    ["safety_rejection", () => Response.json(envelope({ ...valid, steps: ["Reuse the cartridge"] }))],
+    ["safety_rejection", () => Response.json(envelope({ ...valid, answer: "You are ready to tattoo people after this exercise." }))],
+    ["safety_rejection", () => Response.json(envelope({ ...valid, answer: "The photo confirms it is sterile." }))],
+    ["safety_rejection", () => Response.json(envelope({ ...valid, steps: ["Draw a 30 mm line on paper."] }))],
+    ["safety_rejection", () => Response.json({ choices: [{ finish_reason: "content_filter", message: { content: null } }] })],
+    ["provider_refusal", () => Response.json({ choices: [{ finish_reason: "stop", message: { content: null, refusal: "PRIVATE_REFUSAL" } }] })],
+    ["incomplete_response", () => Response.json(envelope(valid, "length"))],
+    ["incomplete_response", () => Response.json(envelope(valid, "tool_calls"))],
+    ["empty_response", () => Response.json({ choices: [{ finish_reason: "stop", message: { content: null } }] })],
+    ["empty_response", () => new Response(null)],
+    ["response_too_large", () => new Response("x".repeat(24001))],
+  ];
+  it.each(cases)("falls back with private-data-free %s diagnostics (%#)", async (category, make) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fixture = make();
+    const fetcher = fixture instanceof Error ? vi.fn().mockRejectedValue(fixture) : vi.fn().mockResolvedValue(fixture);
+    const result = await run(fetcher);
+    expect(result.source).toBe("offline");
+    expect(coachResponseSchema.safeParse(result).success).toBe(true);
+    expect(warn.mock.calls).toEqual([["rook_provider_fallback", { provider: "openai", category, ...(category === "http_failure" ? { status: 429 } : {}) }]]);
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/PRIVATE|pencil|question/i);
+  });
+  it("reports a missing key without making a request", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetcher = vi.fn();
+    const result = await coach(request("Help with lines"), {}, { provider: "openai", apiKey: "", fetch: fetcher });
+    expect(result.source).toBe("offline");
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith("rook_provider_fallback", { provider: "openai", category: "missing_key" });
+  });
+  it("enforces the deadline while waiting for the response body", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => AbortSignal.abort(new DOMException("PRIVATE_TIMEOUT", "TimeoutError")));
+    const fetcher = vi.fn().mockImplementation(async (_url, init) => new Response(new ReadableStream({
+      start(controller) { controller.error(init.signal.reason); },
+    })));
+    expect((await run(fetcher)).source).toBe("offline");
+    expect(timeout).toHaveBeenCalledWith(COACH_TIMEOUT_MS);
+    expect(warn).toHaveBeenCalledWith("rook_provider_fallback", { provider: "openai", category: "timeout" });
   });
 });
