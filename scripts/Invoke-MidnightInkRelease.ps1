@@ -56,6 +56,9 @@ foreach ($entry in $manifest.inventory) {
   if (!$file.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Inventory path escapes release package.' }
   if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $entry.sha256) { throw 'Release or rollback inventory has changed.' }
 }
+foreach ($entry in $manifest.originalConfiguration) {
+  if ((Get-FileHash -LiteralPath (Join-Path $manifest.originalCwd $entry.name) -Algorithm SHA256).Hash -ne $entry.sha256) { throw 'Protected production configuration changed; restage before switching.' }
+}
 foreach ($binary in @(@{path=$manifest.nodeExe;hash=$manifest.nodeHash},@{path=$manifest.pm2Cli;hash=$manifest.pm2CliHash})) {
   if ((Get-FileHash -LiteralPath $binary.path -Algorithm SHA256).Hash -ne $binary.hash) { throw 'Verified runtime executable changed.' }
 }
