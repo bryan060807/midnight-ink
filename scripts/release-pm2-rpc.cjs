@@ -1,12 +1,39 @@
 /* eslint-disable @typescript-eslint/no-require-imports -- Uses the pinned installed PM2 runtime. */
 const fs = require('node:fs');
 const path = require('node:path');
+const net = require('node:net');
 
 function restartPacket(app) {
   if (app.name !== 'midnight-ink' || !path.isAbsolute(app.pm_cwd) || app.pm_exec_path !== path.join(app.pm_cwd, 'scripts', 'server.mjs')) throw new Error('Invalid scoped restart configuration.');
   return { id: 30, env: { ...app.env, current_conf: { ...app } } };
 }
-module.exports = { restartPacket };
+async function quiescedRestart(current, app, operations) {
+  const packet = restartPacket(app);
+  if (current.pm_id !== 30 || current.name !== 'midnight-ink') throw new Error('Unexpected target.');
+  const verifyStopped = async () => {
+    const state = await operations.read();
+    if (state.pm_id !== 30 || state.name !== 'midnight-ink' || state.pid !== 0
+      || !['stopped','waiting restart'].includes(state.pm2_env.status)
+      || state.pm2_env.pm_cwd !== current.pm2_env.pm_cwd
+      || await operations.oldProcessAlive(current.pid) || !await operations.portFree()) throw new Error('Application has not quiesced.');
+  };
+  await operations.stop();
+  await verifyStopped();
+  await operations.waitQuiet();
+  await verifyStopped();
+  await operations.start(packet);
+}
+module.exports = { restartPacket, quiescedRestart };
+
+function portFree(host, port) {
+  return new Promise((resolve,reject) => {
+    const socket = net.createConnection({host,port});
+    socket.setTimeout(2000);
+    socket.once('connect', () => { socket.destroy(); resolve(false); });
+    socket.once('timeout', () => { socket.destroy(); reject(new Error('Listener state is unknown.')); });
+    socket.once('error', error => error.code === 'ECONNREFUSED' ? resolve(true) : reject(new Error('Listener state is unknown.')));
+  });
+}
 
 async function main() {
   const [root, action, approval] = process.argv.slice(2);
@@ -14,7 +41,8 @@ async function main() {
   if (action !== 'inspect' && approval !== '--approved') throw new Error();
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'release-manifest.json'), 'utf8').replace(/^\uFEFF/, ''));
   if (manifest.appId !== 30 || manifest.appName !== 'midnight-ink') throw new Error();
-  const daemonPid = Number(fs.readFileSync(path.join(manifest.pm2Home, 'pm2.pid'), 'utf8').trim());
+  if (action !== 'inspect' && !Number.isInteger(manifest.expectedRpcDaemonPid)) throw new Error();
+  const daemonPid = manifest.expectedRpcDaemonPid || Number(fs.readFileSync(path.join(manifest.pm2Home, 'pm2.pid'), 'utf8').trim());
   process.kill(daemonPid, 0);
   const pm2Root = path.dirname(path.dirname(manifest.pm2Cli));
   const Client = require(path.join(pm2Root, 'lib', 'Client.js'));
@@ -49,8 +77,18 @@ async function main() {
     const app = require(path.join(root,action === 'deploy' ? 'deploy.config.cjs' : 'rollback.config.cjs')).apps[0];
     const destination = action === 'deploy' ? manifest.releasePath : manifest.rollbackPath;
     if (app.pm_cwd !== destination) throw new Error();
-    await call('restartProcessId', restartPacket(app));
-    process.stdout.write('Scoped restart request completed for app 30.');
+    await quiescedRestart(current, app, {
+      read: target,
+      stop: () => call('stopProcessId',30),
+      start: packet => call('restartProcessId',packet),
+      oldProcessAlive: pid => {
+        if (!pid) return false;
+        try { process.kill(pid,0); return true; } catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+      },
+      portFree: () => portFree(app.env.HOST, Number(app.env.PORT)),
+      waitQuiet: () => new Promise(resolve => setTimeout(resolve, Math.max(1000, Math.min(10000, Number(current.pm2_env.restart_delay || 0)+1000)))),
+    });
+    process.stdout.write('Scoped stop/wait/start completed for app 30.');
   } finally {
     clearTimeout(connectDeadline);
     client.disconnectRPC(() => {});

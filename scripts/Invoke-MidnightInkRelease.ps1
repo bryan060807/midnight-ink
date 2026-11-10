@@ -15,8 +15,26 @@ if ($manifest.appName -ne 'midnight-ink' -or $manifest.appId -ne 30) { throw 'Un
 if ($Action -ne 'Validate' -and !$ApproveProductionSwitch) { throw 'Explicit production switch approval is required.' }
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (!$admin) { throw 'Use Administrator PowerShell under the staging account.' }
-$daemonFile = Join-Path $manifest.pm2Home 'pm2.pid'
-$daemonNumber = [int]([IO.File]::ReadAllText($daemonFile).Trim())
+if (!('MidnightInkRpcOwner' -as [type])) {
+  Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class MidnightInkRpcOwner {
+  [DllImport("kernel32.dll", SetLastError=true)]
+  public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint serverPid);
+}
+'@
+}
+$pipe = [IO.Pipes.NamedPipeClientStream]::new('.', 'rpc.sock', [IO.Pipes.PipeDirection]::InOut)
+try {
+  $pipe.Connect(3000)
+  $ownerNumber = [uint32]0
+  if (![MidnightInkRpcOwner]::GetNamedPipeServerProcessId($pipe.SafePipeHandle, [ref]$ownerNumber)) { throw 'Cannot verify existing RPC pipe owner.' }
+  $daemonNumber = [int]$ownerNumber
+} finally { $pipe.Dispose() }
+if ($manifest.Contains('expectedRpcDaemonPid')) {
+  if ($daemonNumber -ne $manifest.expectedRpcDaemonPid) { throw 'RPC daemon ownership changed; inspect before switching.' }
+} elseif ($Action -ne 'Validate') { throw 'RPC daemon owner must be pinned before a production switch.' }
 $daemon = Get-Process -Id $daemonNumber -ErrorAction Stop
 if ($daemon.ProcessName -ne 'node') { throw 'Existing PM2 daemon is not verified.' }
 
@@ -84,6 +102,7 @@ $destination = if ($Action -eq 'Deploy') { $manifest.releasePath } else { $manif
 $null = Invoke-Pm2 @($Action.ToLowerInvariant(), '--approved')
 $after = Get-Target
 if ($after.pm2_env.pm_cwd -ne $destination -or $after.pm2_env.status -ne 'online') { throw 'Release switch did not reach the expected online cwd; follow rollback procedure.' }
+if ($after.pid -le 0 -or @(Get-NetTCPConnection -State Listen -LocalPort ([int]$environment['PORT']) -OwningProcess $after.pid -ErrorAction SilentlyContinue).Count -eq 0) { throw 'Managed application does not own its expected listener; inspect before retrying.' }
 Write-Output "Scoped $Action completed for app 30. Authenticated acceptance checks are still required."
 
 } finally {
