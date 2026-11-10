@@ -36,6 +36,11 @@ warnings, paper dimensions, positive reuse recommendations, conditional/double
 instructions, numeric needle/ink-loading/machine settings and mixed human context.
 They are injected fixtures, not live OpenAI evidence.
 
+The studio browser test now waits for the initial workspace response and the
+rendered learning-link target after a save. A persisted database value alone did
+not prove that the browser refresh had completed, allowing a click on the old
+learning path. No application or database timeout was increased.
+
 The revised package is staged at
 `C:\Users\bryan\aibry\releases\midnight-ink\20261109-combined-r2`.
 Its manifest pins the source and artifacts; `FINAL-RELEASE-REPORT.md` records exact

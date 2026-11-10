@@ -12,7 +12,9 @@ test.beforeEach(async ({ request }) => {
 test('a beginner can learn, log practice, manage equipment and ask offline Rook', async ({ page, request }) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1440, height: 1100 });
+  const initialWorkspace = page.waitForResponse(response => new URL(response.url()).pathname === '/api/workspace' && response.status() === 200);
   await page.goto('/');
+  await initialWorkspace;
   await expect(page.getByRole('link', { name: 'Continue Learning', exact: true })).toBeVisible();
   mkdirSync('docs/screenshots', { recursive: true });
   await page.screenshot({ path: 'docs/screenshots/dashboard-desktop.png', fullPage: true });
@@ -23,8 +25,11 @@ test('a beginner can learn, log practice, manage equipment and ask offline Rook'
   await page.getByRole('button', { name: 'Save learning path', exact: true }).click();
   await expect.poll(async () => (await (await request.get('/api/workspace')).json()).profile.path).toBe('drawing');
 
-  await page.getByRole('link', { name: 'Continue Learning', exact: true }).click();
   const selectedLesson = lessons.find(lesson => lesson.moduleId === 'drawing')!;
+  const continueLearning = page.getByRole('link', { name: 'Continue Learning', exact: true });
+  // Database persistence precedes the browser refresh; wait for its rendered target.
+  await expect(continueLearning).toHaveAttribute('href', `/learn?lesson=${selectedLesson.id}`);
+  await continueLearning.click();
   await page.getByRole('button').filter({ hasText: selectedLesson.title }).click();
   const reflection = page.getByLabel('Your answer or reflection', { exact: true });
   await reflection.fill('I will keep this exercise on paper and compare one controlled movement at a time.');
