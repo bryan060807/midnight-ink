@@ -117,7 +117,7 @@ async function handle(request:Request,context:{params:Promise<{path:string[]}>})
     }
     throw new ApiError(404,'Endpoint not found.');
   }catch(error){
-    if(error instanceof DatabaseError)return json({error:'The database is unavailable. Check PostgreSQL configuration, connectivity, and migrations.'},503);
+    if(error instanceof DatabaseError)return json({error:'The database is unavailable. Check PostgreSQL configuration, connectivity, and migrations.',retryable:error.retryable},503);
     if(error instanceof ApiError)return json({error:error.message},error.status);
     if(error instanceof ZodError)return json({error:'Please check the entered fields.',fields:error.issues.map(issue=>({path:issue.path.join('.'),message:issue.message}))},400);
     return json({error:'The operation could not be completed. Refresh the workspace to check the saved state, then try again.'},500);

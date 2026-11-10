@@ -236,20 +236,29 @@ export async function saveCoaching(profileId: string, input: {question:string;re
   return {id,...input,createdAt:stamp};
 }
 export async function getWorkspace(profileId: string, db: Queryable = getDatabase()) {
+  // One checkout per load. A stable snapshot also avoids mixing concurrent edits.
+  if (!('transaction' in db) || typeof db.transaction !== 'function') return readWorkspace(profileId, db);
+  return transaction(db, async tx => {
+    await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    return readWorkspace(profileId, tx);
+  });
+}
+async function readWorkspace(profileId: string, db: Queryable) {
   const profile = (await db.query('SELECT * FROM "Profile" WHERE "id"=$1', [profileId])).rows[0];
   if (!profile) throw new ApiError(404,'Workspace not found.');
   const contentRows = async (table: ContentTable | 'CoachingSession') => {
     if (![...contentTables,'CoachingSession'].includes(table)) throw new ApiError(400,'Unknown record type.');
     return (await db.query(`SELECT * FROM "${table}" WHERE "profileId"=$1 ORDER BY "createdAt" DESC`, [profileId])).rows.map(decode);
   };
-  const [settings,equipment,lessonProgress,sessions,photoRows,assessments,designs,goals,coaching] = await Promise.all([
-    db.query('SELECT "coachName","goalMinutes" FROM "UserSettings" WHERE "profileId"=$1', [profileId]).then(result => result.rows[0]),
-    contentRows('Equipment'), db.query('SELECT "id","lessonId","completedAt" FROM "LessonProgress" WHERE "profileId"=$1', [profileId]).then(result => result.rows),
-    contentRows('PracticeSession'),
-    db.query('SELECT p."id",p."sessionId",p."mimeType",p."width",p."height",p."size",p."createdAt" FROM "PracticePhoto" p JOIN "PracticeSession" s ON s."id"=p."sessionId" AND s."profileId"=p."profileId" WHERE p."profileId"=$1 ORDER BY p."createdAt" DESC', [profileId]).then(result => result.rows),
-    db.query('SELECT a."id",a."sessionId",a."content",a."updatedAt" FROM "SkillAssessment" a JOIN "PracticeSession" s ON s."id"=a."sessionId" AND s."profileId"=a."profileId" WHERE a."profileId"=$1', [profileId]).then(result => result.rows.map(decode)),
-    contentRows('DesignProject'),contentRows('Goal'),contentRows('CoachingSession'),
-  ]);
+  const settings = (await db.query('SELECT "coachName","goalMinutes" FROM "UserSettings" WHERE "profileId"=$1', [profileId])).rows[0];
+  const equipment = await contentRows('Equipment');
+  const lessonProgress = (await db.query('SELECT "id","lessonId","completedAt" FROM "LessonProgress" WHERE "profileId"=$1', [profileId])).rows;
+  const sessions = await contentRows('PracticeSession');
+  const photoRows = (await db.query('SELECT p."id",p."sessionId",p."mimeType",p."width",p."height",p."size",p."createdAt" FROM "PracticePhoto" p JOIN "PracticeSession" s ON s."id"=p."sessionId" AND s."profileId"=p."profileId" WHERE p."profileId"=$1 ORDER BY p."createdAt" DESC', [profileId])).rows;
+  const assessments = (await db.query('SELECT a."id",a."sessionId",a."content",a."updatedAt" FROM "SkillAssessment" a JOIN "PracticeSession" s ON s."id"=a."sessionId" AND s."profileId"=a."profileId" WHERE a."profileId"=$1', [profileId])).rows.map(decode);
+  const designs = await contentRows('DesignProject');
+  const goals = await contentRows('Goal');
+  const coaching = await contentRows('CoachingSession');
   const photos = photoRows.map(row => ({...row,url:`/api/photos/${row.id}`} as unknown as PracticePhotoSummary));
   return {profile,settings,equipment,lessonProgress,sessions,photos,assessments,designs,goals,coaching};
 }

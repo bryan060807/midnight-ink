@@ -7,6 +7,7 @@ import {
   type FormEvent,
 } from "react";
 import Link from "next/link";
+import { createRefreshGate, recoverWorkspaceRead, TransientWorkspaceError } from "@/lib/workspace-refresh";
 import {
   ArrowDownToLine,
   ArrowRight,
@@ -227,19 +228,23 @@ export default function StudioApp({ section }: { section: string }) {
   const [more, setMore] = useState(false);
   const [accessPending, setAccessPending] = useState(true);
   const refreshVersion = useRef(0);
+  const refreshGate = useRef(createRefreshGate());
   const currentOwner = useRef<string | null>(null);
   const endSession = useCallback(() => {
+    refreshGate.current.invalidate();
     refreshVersion.current += 1;
     currentOwner.current = null;
     setData(null);
     setSession(null);
     window.location.replace(loginDestination());
   }, []);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback((deduplicate = false) => refreshGate.current.run(async (signal) => {
     const version = ++refreshVersion.current;
     try {
+      await recoverWorkspaceRead(async () => {
       const sessionResponse = await fetch("/api/auth/session", {
         cache: "no-store",
+        signal: AbortSignal.any([signal, AbortSignal.timeout(12_000)]),
       });
       const auth = (await sessionResponse.json()) as AuthSession & {
         error?: string;
@@ -265,7 +270,7 @@ export default function StudioApp({ section }: { section: string }) {
         currentOwner.current = auth.profile?.id || null;
       }
       setSession(auth);
-      const response = await fetch("/api/workspace", { cache: "no-store" });
+      const response = await fetch("/api/workspace", { cache: "no-store", signal: AbortSignal.any([signal, AbortSignal.timeout(12_000)]) });
       const json = await response.json();
       if (version !== refreshVersion.current) return;
       if (response.status === 401) {
@@ -274,6 +279,7 @@ export default function StudioApp({ section }: { section: string }) {
       }
       if (!response.ok) {
         setData(null);
+        if (response.status === 503 && json.retryable === true) throw new TransientWorkspaceError(json.error || "The workspace is temporarily unavailable.");
         throw new Error(
           response.status === 403
             ? "Access to this workspace was denied. Sign in with the correct account or contact the operator."
@@ -289,6 +295,7 @@ export default function StudioApp({ section }: { section: string }) {
       setData(json);
       setError("");
       setAccessPending(document.visibilityState === "hidden");
+      }, signal);
     } catch (failure) {
       if (version !== refreshVersion.current) return;
       setData(null);
@@ -300,20 +307,19 @@ export default function StudioApp({ section }: { section: string }) {
       );
       throw failure;
     }
-  }, [endSession]);
+  }, deduplicate), [endSession]);
   useEffect(() => {
-    refresh().catch((e) => setError(e.message));
+    const gate = refreshGate.current;
+    refresh(true).catch(() => {});
     const validate = () => {
       if (document.visibilityState === "visible") {
         setAccessPending(true);
-        refresh().catch((e) => {
-          setData(null);
-          setError(e.message);
-        });
+        refresh(true).catch(() => {});
       }
     };
     const visibilityChanged = () => {
       if (document.visibilityState === "hidden") {
+        refreshGate.current.invalidate();
         refreshVersion.current += 1;
         // Keep unsaved child drafts mounted, but make every private view
         // invisible and inert until the returning tab validates the same owner.
@@ -326,6 +332,8 @@ export default function StudioApp({ section }: { section: string }) {
     document.addEventListener("visibilitychange", visibilityChanged);
     window.addEventListener("midnight-session-expired", expired);
     return () => {
+      refreshVersion.current += 1;
+      gate.invalidate();
       window.clearInterval(interval);
       window.removeEventListener("focus", validate);
       document.removeEventListener("visibilitychange", visibilityChanged);

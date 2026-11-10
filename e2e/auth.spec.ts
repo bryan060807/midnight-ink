@@ -13,6 +13,37 @@ async function workspace(context: BrowserContext) {
   const response = await context.request.get('/api/workspace'); expect(response.status()).toBe(200); return response.json();
 }
 
+test('focus bursts share one read and transient recovery revalidates auth once', async ({ browser, baseURL }) => {
+  const context=await browser.newContext({baseURL});
+  try {
+    const page=await context.newPage();
+    await signIn(page,'Bob');
+    let reads=0, authChecks=0;
+    page.on('request',request=>{if(new URL(request.url()).pathname==='/api/auth/session')authChecks++;});
+    await page.route('**/api/workspace',async route=>{
+      reads++;
+      if(reads===1) {
+        await new Promise(resolve=>setTimeout(resolve,150));
+        await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'Temporary test failure',retryable:true})});
+      } else await route.continue();
+    });
+    await page.evaluate(()=>{for(let i=0;i<20;i++)window.dispatchEvent(new Event('focus'));});
+    await expect.poll(()=>reads).toBe(2);
+    await expect(page.getByRole('button',{name:'Add equipment',exact:true})).toBeVisible();
+    expect(reads).toBe(2); expect(authChecks).toBe(2);
+    // An account mismatch must clear the previous workspace instead of displaying it.
+    await page.unroute('**/api/workspace');
+    await page.route('**/api/workspace',async route=>{
+      const response=await route.fetch();
+      const data=await response.json(); data.profile.id='different-test-owner';
+      await route.fulfill({response,json:data});
+    });
+    await page.evaluate(()=>window.dispatchEvent(new Event('focus')));
+    await expect(page.getByText('The workspace identity could not be confirmed. Sign in again.',{exact:true})).toBeVisible();
+    await expect(page.getByRole('button',{name:'Add equipment',exact:true})).toHaveCount(0);
+  } finally { await context.close(); }
+});
+
 test('two browser identities receive separate workspaces, opaque sessions, safe return and working logout', async ({ browser, baseURL }) => {
   const alice = await browser.newContext({ baseURL }), bob = await browser.newContext({ baseURL });
   try {

@@ -7,18 +7,39 @@ export interface Queryable {
 
 export interface Database extends Queryable {
   readonly schema: string;
+  poolStats(): PoolStats;
   transaction<T>(operation: (client: Queryable) => Promise<T>): Promise<T>;
   end(): Promise<void>;
+}
+
+export type PoolStats = { total: number; idle: number; waiting: number; active: number; connecting: number };
+export type FailureKind = 'pool_timeout' | 'connect_timeout' | 'network' | 'sqlstate' | 'query_timeout' | 'unknown';
+const networkCodes = new Set(['ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','ENOTFOUND','EAI_AGAIN','EPIPE','CERT_HAS_EXPIRED','DEPTH_ZERO_SELF_SIGNED_CERT','UNABLE_TO_VERIFY_LEAF_SIGNATURE','ERR_TLS_CERT_ALTNAME_INVALID']);
+export function classifyDatabaseFailure(error: unknown): { kind: FailureKind; code?: string; retryable: boolean } {
+  const e = error instanceof Error ? error as Error & { code?: string } : undefined;
+  const code = e?.code;
+  if (e?.message === 'timeout exceeded when trying to connect') return {kind:'pool_timeout',retryable:true};
+  if (e?.message === 'Connection terminated due to connection timeout' || e?.message === 'timeout expired') return {kind:'connect_timeout',retryable:true};
+  if (e?.message === 'Query read timeout') return {kind:'query_timeout',retryable:false};
+  if (code && networkCodes.has(code)) return {kind:'network',code,retryable:!code.includes('CERT') && !code.includes('VERIFY')};
+  if (code && /^[A-Z0-9]{5}$/.test(code)) return {kind:code === '57014' ? 'query_timeout' : 'sqlstate',code,retryable:code.startsWith('08') || ['57P01','57P02','57P03','40001','40P01'].includes(code)};
+  if (e?.message === 'Connection terminated unexpectedly' || e?.message === 'Connection terminated') return {kind:'network',retryable:true};
+  return {kind:'unknown',retryable:false};
 }
 
 /** Retain useful SQLSTATE classification without retaining driver messages or credentials. */
 export class DatabaseError extends Error {
   readonly status = 503;
   readonly code?: string;
+  readonly kind: FailureKind;
+  readonly retryable: boolean;
   constructor(error: unknown, message = 'Database operation failed.') {
     super(message);
     this.name = 'DatabaseError';
-    if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' && /^[A-Z0-9]{5}$/.test(error.code)) this.code = error.code;
+    const classified = classifyDatabaseFailure(error);
+    this.code = classified.code;
+    this.kind = classified.kind;
+    this.retryable = classified.retryable;
   }
 }
 
@@ -69,19 +90,45 @@ export function createDatabase(connectionUrl: string, options: { schema?: string
   if (!/^[a-z][a-z0-9_]{0,62}$/.test(schema)) throw new DatabaseError(undefined, 'DATABASE_SCHEMA is invalid.');
   const pool = new Pool(poolConfiguration(connectionUrl, schema));
   // Idle-client failures must not become uncaught process errors; queries report safe failures.
-  pool.on('error', () => {});
+  let active = 0;
+  const stats = (): PoolStats => ({total:pool.totalCount,idle:pool.idleCount,waiting:pool.waitingCount,active,connecting:Math.max(0,pool.totalCount-pool.idleCount-active)});
+  pool.on('acquire', () => { active++; });
+  pool.on('release', () => { active--; });
+  const report = (error: unknown, phase: 'acquire' | 'query' | 'idle', started: number) => {
+    const safe = new DatabaseError(error);
+    // Explicit allowlist only: never log SQL, values, driver text, URLs, owners or auth.
+    console.warn(JSON.stringify({event:'postgres_failure',phase,kind:safe.kind,code:safe.code,retryable:safe.retryable,elapsedMs:Math.round(performance.now()-started),pool:stats()}));
+    return safe;
+  };
+  pool.on('error', error => { report(error,'idle',performance.now()); });
+  const acquire = async () => {
+    const started = performance.now();
+    try {
+      const client = await pool.connect();
+      if (performance.now()-started >= 250) console.warn(JSON.stringify({event:'postgres_acquire_slow',elapsedMs:Math.round(performance.now()-started),pool:stats()}));
+      return client;
+    } catch (error) { throw report(error,'acquire',started); }
+  };
   const wrap = (client: Pick<Pool, 'query'>): Queryable => ({
     async query<R extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]) {
+      const started = performance.now();
       try { return await client.query<R>(text, values); }
-      catch (error) { throw new DatabaseError(error); }
+      catch (error) { throw report(error,'query',started); }
     },
   });
   let ending: Promise<void> | undefined;
   const database: Database = {
     schema,
-    ...wrap(pool),
+    poolStats: stats,
+    async query<R extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]) {
+      const client = await acquire();
+      let discard = false;
+      try { return await wrap(client).query<R>(text,values); }
+      catch (error) { discard = true; throw error; }
+      finally { client.release(discard); }
+    },
     async transaction<T>(operation: (client: Queryable) => Promise<T>): Promise<T> {
-      const client = await pool.connect().catch(error => { throw new DatabaseError(error); });
+      const client = await acquire();
       const tx = wrap(client);
       let discard = false;
       try {
@@ -90,7 +137,8 @@ export function createDatabase(connectionUrl: string, options: { schema?: string
         await tx.query('COMMIT');
         return result;
       } catch (error) {
-        try { await tx.query('ROLLBACK'); } catch { discard = true; }
+        if (error instanceof DatabaseError && ['network','query_timeout'].includes(error.kind)) discard = true;
+        if (!discard) try { await tx.query('ROLLBACK'); } catch { discard = true; }
         throw error;
       } finally { client.release(discard); }
     },
