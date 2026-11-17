@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Beginner guided projects | Midnight Ink</title>
+  <link rel="stylesheet" href="./beginner-tutorials.css">
+  <script src="./beginner-tutorials.js" defer></script>
+</head>
+<body>
+  <header class="shell">
+    <a id="home-link" href="/">Midnight Ink</a>
+    <p class="eyebrow">THE STARTER COLLECTION</p>
+    <h1>Small designs.<br>One clear step at a time.</h1>
+    <p class="intro">
+      Five guided drawing studies for paper and synthetic practice skin.
+      Follow an illustrated stage, check your work, then move on.
+    </p>
+  </header>
+
+  <main class="shell" id="app" hidden>
+    <nav id="projects" class="projects" aria-label="Choose a project"></nav>
+
+    <section id="project" aria-labelledby="project-title">
+      <div class="project-heading">
+        <div>
+          <p id="project-meta" class="eyebrow"></p>
+          <h2 id="project-title"></h2>
+          <p id="project-summary"></p>
+        </div>
+        <button id="restart" class="quiet" type="button">
+          Restart this project
+        </button>
+      </div>
+
+      <p class="setup">
+        <strong>Set up:</strong> Start with paper, pencil, eraser, and a
+        fine-tip pen. For an optional repeat, use a suitable marker on
+        synthetic practice skin secured to a flat mat. These studies
+        cover drawing and design construction.
+      </p>
+
+      <div class="layout">
+        <aside class="panel reference">
+          <h3>Finished reference</h3>
+          <div id="reference" class="paper"></div>
+          <p id="reference-caption"></p>
+        </aside>
+
+        <section class="panel walkthrough" aria-labelledby="step-title">
+          <p id="status" class="eyebrow" role="status"></p>
+          <ol id="steps" class="steps" aria-label="Tutorial steps"></ol>
+          <div id="stage" class="paper"></div>
+          <h3 id="step-title" tabindex="-1"></h3>
+          <p id="instruction"></p>
+          <p class="check">
+            <strong>Look for:</strong> <span id="checkpoint"></span>
+          </p>
+
+          <div class="controls">
+            <button id="back" class="quiet" type="button">Previous</button>
+            <button id="next" type="button">Next step</button>
+            <button id="complete" type="button" hidden>
+              Mark project complete
+            </button>
+          </div>
+
+          <p id="storage-note" class="muted"></p>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <noscript>
+    <p class="shell">Enable JavaScript to open the illustrated walkthroughs.</p>
+  </noscript>
+
+  <footer class="shell muted">
+    Midnight Ink · Starter studies · Your practice progress stays in this browser.
+  </footer>
+</body>
+</html>
