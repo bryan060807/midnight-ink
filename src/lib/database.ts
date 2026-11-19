@@ -69,7 +69,7 @@ function poolConfiguration(connectionUrl: string, schema: string): PoolConfig {
       database: decodeURIComponent(url.pathname.slice(1)),
       user: decodeURIComponent(url.username), password: decodeURIComponent(url.password),
       ssl: mode === 'disable' ? false : { rejectUnauthorized: true, ...(caFile ? { ca: readFileSync(caFile, 'utf8') } : {}) },
-      max: maximum, connectionTimeoutMillis: 5000, idleTimeoutMillis: 30000,
+      max: maximum, connectionTimeoutMillis: 5000, idleTimeoutMillis: 180000,
       query_timeout: 15000, statement_timeout: 15000, idle_in_transaction_session_timeout: 15000,
       application_name: 'midnight-ink', options: `-c search_path=${schema}`,
       // Keep the application's ISO strings and millisecond authentication numbers stable.

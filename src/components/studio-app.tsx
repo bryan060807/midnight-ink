@@ -327,7 +327,7 @@ export default function StudioApp({ section }: { section: string }) {
       } else validate();
     };
     const expired = () => endSession();
-    const interval = window.setInterval(validate, 60_000);
+    const interval = window.setInterval(validate, 120_000);
     window.addEventListener("focus", validate);
     document.addEventListener("visibilitychange", visibilityChanged);
     window.addEventListener("midnight-session-expired", expired);
