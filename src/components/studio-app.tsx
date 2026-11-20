@@ -44,6 +44,7 @@ import {
 import { modules, lessons, exercises, techniqueCards } from "@/lib/curriculum";
 import DesignStudio from "./design-studio";
 import PracticeStudio from "./practice-studio";
+import Academy from "./academy";
 import EquipmentManager from "./equipment-manager";
 
 type AuthSession = {
@@ -1056,6 +1057,9 @@ function Learn({
   }
   return (
     <div className="learning-layout">
+      <div style={{ gridColumn: "1 / -1", minWidth: 0 }}>
+        <Academy completedLessonIds={data.lessonProgress.map((item) => item.lessonId)} onRefresh={refresh} />
+      </div>
       <div className="module-list">
         {modules.map((mod) => {
           const related = lessons.filter((l) => l.moduleId === mod.id);

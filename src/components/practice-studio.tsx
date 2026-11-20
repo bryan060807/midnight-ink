@@ -39,6 +39,10 @@ async function upload(sessionId: string, file: File) {
 
 export default function PracticeStudio({ workspace, onRefresh }: { workspace: Workspace; onRefresh: () => Promise<void> }) {
   const [exerciseId, setExerciseId] = useState(exercises[0]?.id ?? 'straight-lines');
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get('exercise');
+    if (requested && exercises.some(item => item.id === requested)) setExerciseId(requested);
+  }, []);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [startedAt, setStartedAt] = useState<number | null>(null);
